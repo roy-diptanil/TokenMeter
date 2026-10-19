@@ -50,7 +50,7 @@ struct CapBar: View {
 struct MenuLabel: View {
     @ObservedObject var store: Store
     var body: some View {
-        let segs = MenuLabelLogic.buildWithAlert(accounts: store.accounts, snapshots: store.snapshots)
+        let segs = MenuLabelLogic.buildWithAlert(accounts: store.accounts, snapshots: store.snapshots, selectedIDs: store.menuBarAccountIDs)
         Image(nsImage: MenuBarImage.image(segs))
     }
 }
@@ -63,6 +63,11 @@ struct CardActions: View {
     var body: some View {
         Button("Sign in…") { store.signIn(account) }
         Button("Rename…") { rename() }
+        let canToggle = store.canAddToMenuBar(account)
+        Toggle(canToggle ? "Show in menu bar" : "Show in menu bar (3 max — untick another first)",
+               isOn: Binding(get: { store.isInMenuBar(account) }, set: { store.setInMenuBar($0, for: account) }))
+            .disabled(!canToggle)
+            .help(canToggle ? "Pick up to 3 accounts for the menu-bar label" : "3 accounts are already shown; untick another first")
         Divider()
         Button("Remove…", role: .destructive) { store.confirmingRemoval = account.id }
     }

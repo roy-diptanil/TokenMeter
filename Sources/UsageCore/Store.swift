@@ -85,6 +85,19 @@ public enum WindowSelections {
     }
 }
 
+/// Persistence for the menu-bar account choice: an array of account ids under "tokenmeter.menuBarAccounts".
+public enum MenuBarSelection {
+    static let key = "tokenmeter.menuBarAccounts"
+    /// Malformed values give []; duplicates are dropped and the list is trimmed to 3.
+    public static func load(from d: UserDefaults) -> [String] {
+        guard let raw = d.array(forKey: key) as? [String] else { return [] }
+        var seen = Set<String>(), out: [String] = []
+        for id in raw where seen.insert(id).inserted { out.append(id) }
+        return Array(out.prefix(MenuLabelLogic.maxSelected))
+    }
+    public static func save(_ ids: [String], to d: UserDefaults) { d.set(ids, forKey: key) }
+}
+
 /// Remembers the previous network-path state across handler calls (handler runs on one serial queue).
 final class NSLockedBox: @unchecked Sendable {
     private var v: Bool?
@@ -103,6 +116,9 @@ public final class Store: ObservableObject {
     private var pathMonitor: NWPathMonitor?
     /// Per-account 1d/7d/MTD choice (account id -> window); missing = .d7.
     @Published public var windowSelections: [String: UsageWindow] = [:]
+    /// Ids of accounts shown in the menu-bar label (max 3); empty = the two most-constrained accounts.
+    @Published public var menuBarAccountIDs: [String] = []
+    public var menuBarDefaults: UserDefaults?
     /// Where selections persist (nil = nowhere, e.g. UI tests).
     public var windowDefaults: UserDefaults?
     public var persist = true
@@ -116,6 +132,8 @@ public final class Store: ObservableObject {
         accounts = Registry.load()
         windowDefaults = .standard
         windowSelections = WindowSelections.load(from: .standard)
+        menuBarDefaults = .standard
+        menuBarAccountIDs = MenuBarSelection.load(from: .standard)
         loadCache()
         DispatchQueue.main.async { [weak self] in self?.start() }   // poll from launch, not first popover open
     }
@@ -125,6 +143,27 @@ public final class Store: ObservableObject {
     public func setWindow(_ w: UsageWindow, for a: Account) {
         windowSelections[a.id] = w
         if let d = windowDefaults { WindowSelections.save(windowSelections, to: d) }
+    }
+
+    /// Selected ids that still belong to an account.
+    var liveMenuBarIDs: [String] { menuBarAccountIDs.filter { id in accounts.contains { $0.id == id } } }
+    public func isInMenuBar(_ a: Account) -> Bool { liveMenuBarIDs.contains(a.id) }
+    public func canAddToMenuBar(_ a: Account) -> Bool { isInMenuBar(a) || liveMenuBarIDs.count < MenuLabelLogic.maxSelected }
+
+    /// Returns false (and changes nothing) when adding would exceed 3 accounts. Unticking always works.
+    @discardableResult
+    public func setInMenuBar(_ on: Bool, for a: Account) -> Bool {
+        var ids = liveMenuBarIDs
+        if on {
+            if ids.contains(a.id) { return true }
+            guard ids.count < MenuLabelLogic.maxSelected else { return false }
+            ids.append(a.id)
+        } else {
+            ids.removeAll { $0 == a.id }
+        }
+        menuBarAccountIDs = ids
+        if let d = menuBarDefaults { MenuBarSelection.save(ids, to: d) }
+        return true
     }
 
     public func labelExists(_ kind: AccountKind, _ label: String, excluding: String? = nil) -> Bool {
@@ -242,6 +281,10 @@ public final class Store: ObservableObject {
         confirmingRemoval = nil
         accounts = Registry.removing(a.id, from: accounts)
         snapshots[a.id] = nil
+        if menuBarAccountIDs.contains(a.id) {
+            menuBarAccountIDs.removeAll { $0 == a.id }
+            if let d = menuBarDefaults { MenuBarSelection.save(menuBarAccountIDs, to: d) }
+        }
         if windowSelections.removeValue(forKey: a.id) != nil, let d = windowDefaults { WindowSelections.save(windowSelections, to: d) }
         if persist { Registry.save(accounts); saveCache() }
         if persist, let w = a.webStoreID, let u = UUID(uuidString: w),

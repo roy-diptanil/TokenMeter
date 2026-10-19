@@ -97,9 +97,19 @@ enum LabelPreview {
     }
     static func render(to path: String) {
         func seg(_ t: String, _ rem: Double) -> LabelSegment { .init(text: t, remaining: rem, level: MenuLabelLogic.level(remaining: rem)) }
-        let rows: [[LabelSegment]] = [[seg("C 41%", 41), seg("X 91%", 91)], [seg("C 21%", 21), seg("X 91%", 91)], [seg("C 6%", 6), seg("X 18%", 18)]]
-        let scale: CGFloat = 2, cellW: CGFloat = 170, cellH: CGFloat = 30
-        let px = Int(cellW * 2 * scale), py = Int(cellH * 3 * scale)
+        let baseRows: [[LabelSegment]] = [[seg("C 41%", 41), seg("X 91%", 91)], [seg("C 21%", 21), seg("X 91%", 91)], [seg("C 6%", 6), seg("X 18%", 18)]]
+        // 4th row: three user-selected accounts (normal, amber, red) plus the global red "!" (a fourth, unselected account needs sign-in)
+        let sel = [Account(kind: .claude, label: "Claude"), Account(kind: .codex, label: "Work"), Account(kind: .codex, label: "Team")]
+        let other = Account(kind: .codex, label: "Other", webStoreID: UUID().uuidString)
+        func snap(_ used: Double) -> AccountSnapshot { var s = AccountSnapshot(); var c = CapSnapshot(); c.percent = used; s.cap = c; s.capUpdated = Date(); return s }
+        var redSnap = AccountSnapshot(); redSnap.webLoginNeeded = true
+        let selected = MenuLabelLogic.buildWithAlert(accounts: sel + [other],
+                                                     snapshots: [sel[0].id: snap(59), sel[1].id: snap(79), sel[2].id: snap(94), other.id: redSnap],
+                                                     selectedIDs: sel.map(\.id))
+        let rows = baseRows + [selected]
+        let scale: CGFloat = 2, cellW: CGFloat = 230, cellH: CGFloat = 30
+        let nRows = rows.count
+        let px = Int(cellW * 2 * scale), py = Int(cellH * CGFloat(nRows) * scale)
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: py, bitsPerSample: 8, samplesPerPixel: 4,
                                          hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
               let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return }
@@ -107,7 +117,7 @@ enum LabelPreview {
         ctx.cgContext.scaleBy(x: scale, y: scale)
         for (col, dark) in [false, true].enumerated() {
             for (row, segs) in rows.enumerated() {
-                let r = NSRect(x: CGFloat(col) * cellW, y: CGFloat(2 - row) * cellH, width: cellW, height: cellH)
+                let r = NSRect(x: CGFloat(col) * cellW, y: CGFloat(nRows - 1 - row) * cellH, width: cellW, height: cellH)
                 (dark ? NSColor(white: 0.16, alpha: 1) : NSColor(white: 0.92, alpha: 1)).setFill(); r.fill()
                 var img = MenuBarImage.image(segs)
                 if img.isTemplate { img = tinted(img, dark ? .white : .black) }

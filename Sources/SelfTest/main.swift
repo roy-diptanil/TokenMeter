@@ -389,6 +389,55 @@ await MainActor.run {
     check(WindowSelections.load(from: ud).isEmpty, "window: malformed stored value tolerated")
     UserDefaults.standard.removePersistentDomain(forName: suite)
 }
+// --- menu-bar account choice (invented data)
+let m1 = Account(kind: .claude, label: "Claude"), m2 = Account(kind: .codex, label: "Work"), m3 = Account(kind: .codex, label: "Team"), m4 = Account(kind: .claude, label: "Spare")
+func msnap(_ used: Double?) -> AccountSnapshot { snapUsed(used) }
+let msn = [m1.id: msnap(10), m2.id: msnap(95), m3.id: msnap(50), m4.id: msnap(70)]
+let all4 = [m1, m2, m3, m4]
+func sel(_ ids: [Account], _ accts: [Account] = all4, _ sn: [String: AccountSnapshot] = msn) -> [String] {
+    MenuLabelLogic.buildSelected(accounts: accts, snapshots: sn, selectedIDs: ids.map(\.id)).map(\.text)
+}
+check(sel([m3]) == ["X 50%"], "selected 1: \(sel([m3]))")
+check(sel([m3, m1]) == ["C 90%", "X 50%"], "selected 2 in registry order, not by constraint: \(sel([m3, m1]))")
+check(sel([m4, m2, m1]).count == 3 && sel([m4, m2, m1]) == ["C 90%", "W 5%", "S 30%"], "selected 3 in registry order: \(sel([m4, m2, m1]))")
+check(MenuLabelLogic.text(MenuLabelLogic.buildWithAlert(accounts: all4, snapshots: msn, selectedIDs: [])) == MenuLabelLogic.text(MenuLabelLogic.build(accounts: all4, snapshots: msn)), "empty selection = auto mode")
+check(MenuLabelLogic.buildWithAlert(accounts: all4, snapshots: msn, selectedIDs: ["gone"]).map(\.text) == MenuLabelLogic.build(accounts: all4, snapshots: msn).map(\.text), "only stale ids -> auto mode")
+check(MenuLabelLogic.buildSelected(accounts: all4, snapshots: msn, selectedIDs: ["gone", m3.id]).map(\.text) == ["X 50%"], "stale id ignored")
+check(MenuLabelLogic.buildSelected(accounts: all4, snapshots: msn, selectedIDs: all4.map(\.id)).count == 3, "never more than 3 segments")
+let nodata = MenuLabelLogic.buildSelected(accounts: [m1, m2], snapshots: [m2.id: msnap(40)], selectedIDs: [m1.id, m2.id])
+check(nodata.map(\.text) == ["C --", "X 60%"] && nodata[0].level == .normal, "no-data selected account keeps its slot")
+// 3 same-kind accounts: distinct initials, then digits
+let d1 = Account(kind: .codex, label: "Alpha"), d2 = Account(kind: .codex, label: "Beta"), d3 = Account(kind: .codex, label: "Gamma")
+check(sel([d1, d2, d3], [d1, d2, d3], [:]) == ["A --", "B --", "G --"], "3 same-kind: initials \(sel([d1, d2, d3], [d1, d2, d3], [:]))")
+let e1 = Account(kind: .codex, label: "Work A"), e2 = Account(kind: .codex, label: "Work B"), e3 = Account(kind: .codex, label: "Team")
+check(sel([e1, e2, e3], [e1, e2, e3], [:]) == ["X1 --", "X2 --", "X3 --"], "3 same-kind clashing initials -> digits")
+check(MenuLabelLogic.text(MenuLabelLogic.buildWithAlert(accounts: all4, snapshots: msn, selectedIDs: [m1.id, m2.id, m3.id])).count <= 24, "3-segment label stays compact")
+// '!' is global
+var redS = msn; redS[m4.id] = { var x = msnap(70); x.webLoginNeeded = true; return x }()
+let ar = MenuLabelLogic.buildWithAlert(accounts: all4, snapshots: redS, selectedIDs: [m1.id, m3.id])
+check(ar.last?.isAlert == true && ar.last?.level == .red && MenuLabelLogic.text(ar) == "C 90% · X 50% !", "! when an UNselected account is red: \(MenuLabelLogic.text(ar))")
+var redSel = msn; redSel[m1.id] = { var x = msnap(10); x.webLoginNeeded = true; return x }()
+check(MenuLabelLogic.buildWithAlert(accounts: all4, snapshots: redSel, selectedIDs: [m1.id]).last?.isAlert == true, "! when a selected account is red")
+check(!MenuLabelLogic.buildWithAlert(accounts: all4, snapshots: msn, selectedIDs: [m1.id]).contains(where: \.isAlert), "no ! when none red")
+let onlyBang = MenuLabelLogic.buildWithAlert(accounts: [m1], snapshots: [m1.id: { var x = AccountSnapshot(); x.webLoginNeeded = true; return x }()], selectedIDs: [])
+check(MenuLabelLogic.text(onlyBang) == "!", "red account, no data, no selection -> just !")
+await MainActor.run {
+    let ud = UserDefaults(suiteName: "tokenmeter.selftest.\(UUID().uuidString)")!
+    let st = Store(accounts: all4, snapshots: [:]); st.menuBarDefaults = ud
+    check(st.setInMenuBar(true, for: m1) && st.setInMenuBar(true, for: m2) && st.setInMenuBar(true, for: m3), "add 3 ok")
+    check(!st.canAddToMenuBar(m4) && st.canAddToMenuBar(m1), "4th disabled, selected ones stay enabled")
+    check(st.setInMenuBar(true, for: m4) == false && !st.isInMenuBar(m4) && st.menuBarAccountIDs.count == 3, "4th add rejected")
+    check(st.setInMenuBar(false, for: m2) && st.canAddToMenuBar(m4) && st.setInMenuBar(true, for: m4), "untick works, then 4th fits")
+    check(Set(MenuBarSelection.load(from: ud)) == Set([m1.id, m3.id, m4.id]), "selection persisted")
+    st.remove(m3)
+    check(!st.menuBarAccountIDs.contains(m3.id) && !MenuBarSelection.load(from: ud).contains(m3.id), "removal clears the id")
+    ud.set(["a", "b", "c", "d", "a"], forKey: "tokenmeter.menuBarAccounts")
+    check(MenuBarSelection.load(from: ud) == ["a", "b", "c"], "stored list trimmed to 3 and de-duplicated")
+    ud.set("junk", forKey: "tokenmeter.menuBarAccounts")
+    check(MenuBarSelection.load(from: ud).isEmpty, "malformed stored value tolerated")
+    st.menuBarAccountIDs = ["stale1", m1.id]
+    check(st.isInMenuBar(m1) && st.canAddToMenuBar(m2) && st.setInMenuBar(true, for: m2), "stale ids do not count toward the cap")
+}
 
 print(failures == 0 ? "ALL TESTS PASSED" : "\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)

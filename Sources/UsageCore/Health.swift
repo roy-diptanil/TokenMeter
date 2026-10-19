@@ -90,8 +90,10 @@ public enum AccountHealth {
 
 extension MenuLabelLogic {
     /// Same as `build`, plus a trailing red "!" segment whenever any account is red (amber alone adds nothing).
-    public static func buildWithAlert(accounts: [Account], snapshots: [String: AccountSnapshot], limit: Int = 2) -> [LabelSegment] {
-        var segs = build(accounts: accounts, snapshots: snapshots, limit: limit)
+    public static func buildWithAlert(accounts: [Account], snapshots: [String: AccountSnapshot], limit: Int = 2, selectedIDs: [String] = []) -> [LabelSegment] {
+        let live = selectedIDs.filter { id in accounts.contains { $0.id == id } }
+        var segs = live.isEmpty ? build(accounts: accounts, snapshots: snapshots, limit: limit)
+                                : buildSelected(accounts: accounts, snapshots: snapshots, selectedIDs: live)
         if accounts.contains(where: { AccountHealth.status($0, snapshots[$0.id]) == .red }) {
             segs.append(LabelSegment(text: "!", remaining: 0, level: .red, isAlert: true))
         }
