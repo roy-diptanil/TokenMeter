@@ -15,18 +15,27 @@ public struct LabelSegment: Equatable {
 public enum MenuLabelLogic {
     public static func level(remaining r: Double) -> LabelSegment.Level { r <= 10 ? .red : (r <= 25 ? .amber : .normal) }
 
-    public static func build(accounts: [Account], snapshots: [String: AccountSnapshot], limit: Int = 2) -> [LabelSegment] {
-        struct Item { var a: Account; var remaining: Double; var order: Int }
-        var items: [Item] = []
+    private struct Ranked { var a: Account; var remaining: Double }
+
+    /// Accounts with data, most constrained first (ties keep registry order), cut to `limit`.
+    private static func ranked(accounts: [Account], snapshots: [String: AccountSnapshot], limit: Int) -> [Ranked] {
+        var items: [(r: Ranked, order: Int)] = []
         for (i, a) in accounts.enumerated() {
             guard let used = snapshots[a.id]?.cap?.percent, used.isFinite else { continue }
-            items.append(Item(a: a, remaining: min(max(100 - used, 0), 100), order: i))
+            items.append((Ranked(a: a, remaining: min(max(100 - used, 0), 100)), i))
         }
-        // lowest remaining first; ties keep registry order
-        items.sort { $0.remaining != $1.remaining ? $0.remaining < $1.remaining : $0.order < $1.order }
-        let top = Array(items.prefix(limit))
-        let letters = letters(for: top.map(\.a))
-        return zip(top, letters).map { it, l in
+        items.sort { $0.r.remaining != $1.r.remaining ? $0.r.remaining < $1.r.remaining : $0.order < $1.order }
+        return items.prefix(limit).map(\.r)
+    }
+
+    /// Ids the auto mode displays (the same accounts `build` renders), most constrained first.
+    public static func autoSelectedIDs(accounts: [Account], snapshots: [String: AccountSnapshot], limit: Int = 2) -> [String] {
+        ranked(accounts: accounts, snapshots: snapshots, limit: limit).map(\.a.id)
+    }
+
+    public static func build(accounts: [Account], snapshots: [String: AccountSnapshot], limit: Int = 2) -> [LabelSegment] {
+        let top = ranked(accounts: accounts, snapshots: snapshots, limit: limit)
+        return zip(top, letters(for: top.map(\.a))).map { it, l in
             LabelSegment(text: "\(l) \(Int(it.remaining.rounded()))%", remaining: it.remaining, level: level(remaining: it.remaining))
         }
     }
