@@ -72,6 +72,19 @@ public enum Fetcher {
     }
 }
 
+/// Persistence for the per-account window choice: one dictionary under "tokenmeter.windowSelections".
+public enum WindowSelections {
+    static let key = "tokenmeter.windowSelections"
+    /// Unknown or malformed stored values are dropped (they fall back to .d7).
+    public static func load(from d: UserDefaults) -> [String: UsageWindow] {
+        guard let raw = d.dictionary(forKey: key) as? [String: String] else { return [:] }
+        return raw.compactMapValues { UsageWindow(rawValue: $0) }
+    }
+    public static func save(_ sel: [String: UsageWindow], to d: UserDefaults) {
+        d.set(sel.mapValues(\.rawValue), forKey: key)
+    }
+}
+
 /// Remembers the previous network-path state across handler calls (handler runs on one serial queue).
 final class NSLockedBox: @unchecked Sendable {
     private var v: Bool?
@@ -88,7 +101,10 @@ public final class Store: ObservableObject {
     private var resultToken = 0
     private var wakeObserver: NSObjectProtocol?
     private var pathMonitor: NWPathMonitor?
-    @Published public var windowSel: UsageWindow = .d7
+    /// Per-account 1d/7d/MTD choice (account id -> window); missing = .d7.
+    @Published public var windowSelections: [String: UsageWindow] = [:]
+    /// Where selections persist (nil = nowhere, e.g. UI tests).
+    public var windowDefaults: UserDefaults?
     public var persist = true
     private var timer: Timer?
     private var lastRefresh: Date?
@@ -98,8 +114,17 @@ public final class Store: ObservableObject {
 
     public init() {
         accounts = Registry.load()
+        windowDefaults = .standard
+        windowSelections = WindowSelections.load(from: .standard)
         loadCache()
         DispatchQueue.main.async { [weak self] in self?.start() }   // poll from launch, not first popover open
+    }
+
+    public func window(for a: Account) -> UsageWindow { windowSelections[a.id] ?? .d7 }
+
+    public func setWindow(_ w: UsageWindow, for a: Account) {
+        windowSelections[a.id] = w
+        if let d = windowDefaults { WindowSelections.save(windowSelections, to: d) }
     }
 
     public func labelExists(_ kind: AccountKind, _ label: String, excluding: String? = nil) -> Bool {
@@ -217,6 +242,7 @@ public final class Store: ObservableObject {
         confirmingRemoval = nil
         accounts = Registry.removing(a.id, from: accounts)
         snapshots[a.id] = nil
+        if windowSelections.removeValue(forKey: a.id) != nil, let d = windowDefaults { WindowSelections.save(windowSelections, to: d) }
         if persist { Registry.save(accounts); saveCache() }
         if persist, let w = a.webStoreID, let u = UUID(uuidString: w),
            !accounts.contains(where: { $0.webStoreID == w }) {
