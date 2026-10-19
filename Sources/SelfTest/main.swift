@@ -438,6 +438,48 @@ await MainActor.run {
     st.menuBarAccountIDs = ["stale1", m1.id]
     check(st.isInMenuBar(m1) && st.canAddToMenuBar(m2) && st.setInMenuBar(true, for: m2), "stale ids do not count toward the cap")
 }
+// --- effective menu-bar selection (auto mode shows as ticked)
+let f1 = Account(kind: .claude, label: "Claude"), f2 = Account(kind: .codex, label: "Work"), f3 = Account(kind: .codex, label: "Team")
+let fsn = [f1.id: snapUsed(30), f2.id: snapUsed(95), f3.id: snapUsed(80)]   // most constrained: Work (5% left), Team (20%)
+check(MenuLabelLogic.autoSelectedIDs(accounts: [f1, f2, f3], snapshots: fsn) == [f2.id, f3.id], "autoSelectedIDs: two most constrained")
+// ties and missing data agree with build output
+for (accts, sn) in [([f1, f2, f3], [f1.id: snapUsed(50), f2.id: snapUsed(50), f3.id: snapUsed(50)]),
+                    ([f1, f2, f3], [f1.id: snapUsed(nil), f2.id: snapUsed(40), f3.id: snapUsed(nil)]),
+                    ([f1, f2, f3], [:] as [String: AccountSnapshot])] {
+    let ids = MenuLabelLogic.autoSelectedIDs(accounts: accts, snapshots: sn)
+    check(ids.count == MenuLabelLogic.build(accounts: accts, snapshots: sn).count, "autoSelectedIDs count agrees with build")
+    check(MenuLabelLogic.build(accounts: accts, snapshots: sn).map(\.text) == MenuLabelLogic.buildSelected(accounts: accts, snapshots: sn, selectedIDs: ids).sorted { ($0.remaining, $0.text) < ($1.remaining, $1.text) }.map(\.text) || ids.count < 2, "build and selected agree (\(ids.count))")
+}
+check(MenuLabelLogic.autoSelectedIDs(accounts: [f1, f2, f3], snapshots: [f1.id: snapUsed(50), f2.id: snapUsed(50), f3.id: snapUsed(50)]) == [f1.id, f2.id], "tie keeps registry order")
+await MainActor.run {
+    let ud = UserDefaults(suiteName: "tokenmeter.selftest.\(UUID().uuidString)")!
+    let st = Store(accounts: [f1, f2, f3], snapshots: fsn); st.menuBarDefaults = ud
+    check(st.menuBarAccountIDs.isEmpty && Set(st.effectiveMenuBarIDs) == [f2.id, f3.id], "auto mode: effective = the two shown")
+    check(!st.isInMenuBar(f1) && st.isInMenuBar(f2) && st.isInMenuBar(f3), "auto mode: checkboxes ticked for exactly the shown accounts")
+    check(st.canAddToMenuBar(f1), "auto mode with 2 shown: a third can be ticked")
+    check(st.setInMenuBar(true, for: f1), "tick a third")
+    check(st.menuBarAccountIDs == [f1.id, f2.id, f3.id], "stored = auto two + third, registry order")
+    check(MenuLabelLogic.buildWithAlert(accounts: [f1, f2, f3], snapshots: fsn, selectedIDs: st.menuBarAccountIDs).filter { !$0.isAlert }.count == 3, "label shows 3")
+    // cap with 3 selected, 4th account
+    let f4 = Account(kind: .claude, label: "Spare"); st.accounts.append(f4)
+    check(!st.canAddToMenuBar(f4) && st.setInMenuBar(true, for: f4) == false, "at 3 the others are disabled and refused")
+    st.accounts.removeAll { $0.id == f4.id }
+    // untick one of the two auto accounts from a fresh auto state
+    let st2 = Store(accounts: [f1, f2, f3], snapshots: fsn); st2.menuBarDefaults = ud
+    check(st2.setInMenuBar(false, for: f2) && st2.menuBarAccountIDs == [f3.id], "untick one of the auto two -> only the other remains")
+    check(st2.isInMenuBar(f3) && !st2.isInMenuBar(f2) && !st2.isInMenuBar(f1), "checkboxes follow")
+    check(st2.setInMenuBar(false, for: f3) && st2.menuBarAccountIDs.isEmpty && Set(st2.effectiveMenuBarIDs) == [f2.id, f3.id], "untick all -> back to auto, auto accounts ticked again")
+    // ticking in auto mode adds to the two shown instead of replacing them
+    let st3 = Store(accounts: [f1, f2, f3], snapshots: [f1.id: snapUsed(30), f2.id: snapUsed(95), f3.id: snapUsed(nil)])
+    check(st3.effectiveMenuBarIDs == [f2.id, f1.id] && st3.setInMenuBar(true, for: f3) && st3.menuBarAccountIDs == [f1.id, f2.id, f3.id], "fewer than 2 with data: effective is just those; tick adds")
+    // checkmarks follow data changes (derived, no stale copy)
+    let st4 = Store(accounts: [f1, f2, f3], snapshots: fsn)
+    st4.snapshots[f1.id] = snapUsed(99)
+    check(st4.isInMenuBar(f1) && !st4.isInMenuBar(f3), "auto set re-derived when data changes")
+    // deleted account drops out of the effective selection
+    st.remove(f1)
+    check(!st.effectiveMenuBarIDs.contains(f1.id) && st.effectiveMenuBarIDs.count == 2, "deleted account dropped")
+}
 
 print(failures == 0 ? "ALL TESTS PASSED" : "\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)

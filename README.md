@@ -70,7 +70,7 @@ Each account card has a status dot, with two states:
 - Green: the most recent refresh succeeded.
 - Red: the most recent refresh failed for any reason (signed out, network error, endpoint changed, timeout, or per-model data unavailable), or the account was never signed in. The card keeps the last good numbers (dimmed) and shows the reason with "last synced ...". Auth problems get a "Sign in" button; anything else gets "Retry". Hover the dot for details.
 
-Use ⋯ → Show in menu bar to pick up to 3 accounts for the menu-bar label; by default it shows the two closest to their cap.
+Use ⋯ → Show in menu bar to pick up to 3 accounts for the menu-bar label; by default it shows the two closest to their cap (those start ticked; untick everything to go back to that default).
 
 When any account is red, a summary row appears at the top of the popover and the menu-bar label gets a red `!` after the percentages.
 Besides the 5-minute timer, TokenMeter refreshes when the Mac wakes, when the network comes back, and when you open the popover after a minute. None of these ever opens a sign-in window.

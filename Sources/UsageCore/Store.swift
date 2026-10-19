@@ -145,15 +145,25 @@ public final class Store: ObservableObject {
         if let d = windowDefaults { WindowSelections.save(windowSelections, to: d) }
     }
 
-    /// Selected ids that still belong to an account.
-    var liveMenuBarIDs: [String] { menuBarAccountIDs.filter { id in accounts.contains { $0.id == id } } }
-    public func isInMenuBar(_ a: Account) -> Bool { liveMenuBarIDs.contains(a.id) }
-    public func canAddToMenuBar(_ a: Account) -> Bool { isInMenuBar(a) || liveMenuBarIDs.count < MenuLabelLogic.maxSelected }
+    /// Selected ids that still belong to an account (stored order, at most 3).
+    var liveMenuBarIDs: [String] {
+        Array(menuBarAccountIDs.filter { id in accounts.contains { $0.id == id } }.prefix(MenuLabelLogic.maxSelected))
+    }
+    /// What the menu-bar label actually shows: the stored selection, or in auto mode (nothing stored) the accounts auto mode displays.
+    /// Always derived from current state, so the checkmarks cannot go stale.
+    public var effectiveMenuBarIDs: [String] {
+        let live = liveMenuBarIDs
+        return live.isEmpty ? MenuLabelLogic.autoSelectedIDs(accounts: accounts, snapshots: snapshots) : live
+    }
+    public func isInMenuBar(_ a: Account) -> Bool { effectiveMenuBarIDs.contains(a.id) }
+    public func canAddToMenuBar(_ a: Account) -> Bool { isInMenuBar(a) || effectiveMenuBarIDs.count < MenuLabelLogic.maxSelected }
 
     /// Returns false (and changes nothing) when adding would exceed 3 accounts. Unticking always works.
+    /// In auto mode the displayed accounts are first materialized into the stored selection, then the toggle is applied.
+    /// Unticking everything empties the stored selection, which returns to auto mode (the auto accounts show as ticked again).
     @discardableResult
     public func setInMenuBar(_ on: Bool, for a: Account) -> Bool {
-        var ids = liveMenuBarIDs
+        var ids = effectiveMenuBarIDs
         if on {
             if ids.contains(a.id) { return true }
             guard ids.count < MenuLabelLogic.maxSelected else { return false }
@@ -161,8 +171,9 @@ public final class Store: ObservableObject {
         } else {
             ids.removeAll { $0 == a.id }
         }
-        menuBarAccountIDs = ids
-        if let d = menuBarDefaults { MenuBarSelection.save(ids, to: d) }
+        let keep = Set(ids)
+        menuBarAccountIDs = accounts.map(\.id).filter { keep.contains($0) }   // registry order
+        if let d = menuBarDefaults { MenuBarSelection.save(menuBarAccountIDs, to: d) }
         return true
     }
 
