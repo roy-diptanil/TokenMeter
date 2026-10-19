@@ -271,6 +271,29 @@ await MainActor.run {
     }
 }
 try? await Task.sleep(nanoseconds: 200_000_000)
+// background check (no popover): throttle boundaries and model tick
+check(await MainActor.run { UpdateModel.pollInterval } == 3600, "poll interval is hourly")
+let bgNotDue = MemStore(); bgNotDue.lastCheck = now.addingTimeInterval(-24 * 3600 + 1)
+check(await checker({ shaB }, bgNotDue).checkIfDue(installed: clean) == nil, "bg: 23h59m59s -> no network check")
+let bgDue = MemStore(); bgDue.lastCheck = now.addingTimeInterval(-24 * 3600)
+check(await checker({ shaB }, bgDue).checkIfDue(installed: clean) == .updateAvailable(shaB), "bg: exactly 24h -> checks without any popover")
+check(!UpdateChecker.shouldAutoCheck(last: now.addingTimeInterval(-24 * 3600 + 1), now: now) && UpdateChecker.shouldAutoCheck(last: now.addingTimeInterval(-24 * 3600 - 1), now: now), "bg: 24h boundary")
+func bgModel(lastCheck: Date, remote: @escaping () async throws -> String) async -> (UpdateModel, MemStore) {
+    await MainActor.run {
+        let st = MemStore(); st.lastRemoteSHA = shaA; st.lastCheck = lastCheck; st.cacheInstalledCommit = shaA
+        return (UpdateModel(installed: clean, checker: checker(remote, st)), st)
+    }
+}
+let (mDue, _) = await bgModel(lastCheck: now.addingTimeInterval(-25 * 3600)) { shaB }
+await MainActor.run { check(mDue.state == .result(.upToDate), "bg model: starts upToDate from cache") }
+await mDue.autoCheck()?.value
+await MainActor.run { check(mDue.state == .result(.updateAvailable(shaB)), "bg model: due tick -> Update available") }
+let (mNot, _) = await bgModel(lastCheck: now.addingTimeInterval(-3600)) { shaB }
+await mNot.autoCheck()?.value
+await MainActor.run { check(mNot.state == .result(.upToDate), "bg model: not-due tick leaves state unchanged") }
+let (mFail, _) = await bgModel(lastCheck: now.addingTimeInterval(-25 * 3600)) { throw Boom() }
+await mFail.autoCheck()?.value
+await MainActor.run { check(mFail.state == .result(.upToDate), "bg model: failed background check is silent") }
 let cmd = UpdateInstaller.shellCommand()
 check(cmd.contains("https://raw.githubusercontent.com/roy-diptanil/TokenMeter/main/install.sh") && cmd.contains("| /bin/bash"), "cmd: install url")
 check(cmd.contains("Library/Logs/TokenMeter-update.log") && cmd.contains("nohup") && cmd.contains("/opt/homebrew/bin")
