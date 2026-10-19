@@ -216,7 +216,7 @@ check(wx?.windowLabel == "5-hour" && wx?.bars.map(\.name) == ["Weekly", "Extra u
 
 // --- Feature B: update checker (invented SHAs, injected deps, no network)
 let shaA = String(repeating: "a1", count: 20), shaB = String(repeating: "b2", count: 20)
-final class MemStore: UpdateCheckStorage { var lastCheck: Date?; var lastRemoteSHA: String? }
+final class MemStore: UpdateCheckStorage { var lastCheck: Date?; var lastRemoteSHA: String?; var cacheInstalledCommit: String? }
 struct Boom: Error, LocalizedError { var errorDescription: String? { "offline" } }
 func checker(_ remote: @escaping () async throws -> String, _ st: MemStore = MemStore()) -> UpdateChecker {
     UpdateChecker(remoteSHA: remote, clock: { now }, storage: st)
@@ -231,7 +231,7 @@ check(await checker({ throw Boom() }).check(installed: clean) == .checkFailed("o
 let memo = MemStore()
 _ = await checker({ shaB }, memo).check(installed: clean)
 check(memo.lastCheck == now && memo.lastRemoteSHA == shaB, "check records time + sha")
-check(checker({ shaA }, memo).cachedResult(installed: clean) == .updateAvailable(shaB), "cached result without network")
+check(memo.cacheInstalledCommit == shaA, "check records which installed build the cache is for")
 check(await checker({ shaA }, memo).checkIfDue(installed: clean) == nil, "auto check throttled right after a check")
 let failMemo = MemStore()
 _ = await checker({ throw Boom() }, failMemo).checkIfDue(installed: clean)
@@ -246,6 +246,31 @@ check(InstalledBuild.from(info: ["TokenMeterCommit": shaA, "TokenMeterDirty": "f
       && InstalledBuild.from(info: ["TokenMeterCommit": "unknown"]).commit == nil
       && InstalledBuild.from(info: ["TokenMeterCommit": shaA, "TokenMeterDirty": "true"]).dirty
       && InstalledBuild.from(info: nil).isDev && clean.short == "a1a1a1a", "installed build from Info.plist")
+// launch-time cache handling
+let c1 = MemStore(); c1.lastRemoteSHA = shaB; c1.lastCheck = now.addingTimeInterval(-3600); c1.cacheInstalledCommit = shaA
+let ls1 = checker({ shaA }, c1).launchState(installed: clean)
+check(ls1.shown == nil && ls1.verifyNow, "cached update-available is never shown; verified live")
+let c2 = MemStore(); c2.lastRemoteSHA = shaA; c2.lastCheck = now.addingTimeInterval(-3600); c2.cacheInstalledCommit = shaA
+let ls2 = checker({ shaA }, c2).launchState(installed: clean)
+check(ls2.shown == .upToDate && !ls2.verifyNow, "cached upToDate shown instantly, no forced check")
+let c3 = MemStore(); c3.lastRemoteSHA = shaB; c3.lastCheck = now.addingTimeInterval(-3600); c3.cacheInstalledCommit = shaB
+let ls3 = checker({ shaA }, c3).launchState(installed: clean)
+check(ls3.shown == nil && ls3.verifyNow && c3.lastRemoteSHA == nil && c3.lastCheck == nil && c3.cacheInstalledCommit == shaA, "cache for a different installed build is discarded")
+let c4 = MemStore(); c4.lastRemoteSHA = shaB; c4.lastCheck = now.addingTimeInterval(-3600)   // legacy cache without installed-build key
+check(checker({ shaA }, c4).launchState(installed: clean).verifyNow && c4.lastRemoteSHA == nil, "legacy cache discarded")
+let c5 = MemStore(); c5.lastRemoteSHA = shaB; c5.cacheInstalledCommit = "unknown"
+check(checker({ shaA }, c5).launchState(installed: InstalledBuild(commit: nil, dirty: false)).shown == .devBuild(remoteDiffers: true), "cached devBuild shown instantly")
+await MainActor.run {
+    // stale cache says update available, but remote now equals installed: never shows 'Update available'
+    let st = MemStore(); st.lastRemoteSHA = shaB; st.lastCheck = now.addingTimeInterval(-60); st.cacheInstalledCommit = shaA
+    let m = UpdateModel(installed: clean, checker: checker({ shaA }, st))
+    check(m.state == .checking && !m.updateAvailable, "model: stale cache -> checking, not 'Update available'")
+    Task { @MainActor in
+        await m.pending?.value
+        check(m.state == .result(.upToDate) && st.lastRemoteSHA == shaA, "model: live check resolves to upToDate")
+    }
+}
+try? await Task.sleep(nanoseconds: 200_000_000)
 let cmd = UpdateInstaller.shellCommand()
 check(cmd.contains("https://raw.githubusercontent.com/roy-diptanil/TokenMeter/main/install.sh") && cmd.contains("| /bin/bash"), "cmd: install url")
 check(cmd.contains("Library/Logs/TokenMeter-update.log") && cmd.contains("nohup") && cmd.contains("/opt/homebrew/bin")

@@ -27,6 +27,7 @@ public enum UpdateResult: Equatable {
 public protocol UpdateCheckStorage: AnyObject {
     var lastCheck: Date? { get set }
     var lastRemoteSHA: String? { get set }
+    var cacheInstalledCommit: String? { get set }   // which installed build lastRemoteSHA/lastCheck were computed for
 }
 
 /// UserDefaults-backed storage (suiteless, keys prefixed "tokenmeter.").
@@ -39,6 +40,10 @@ public final class DefaultsUpdateStorage: UpdateCheckStorage {
     public var lastRemoteSHA: String? {
         get { UserDefaults.standard.string(forKey: "tokenmeter.update.lastRemoteSHA") }
         set { UserDefaults.standard.set(newValue, forKey: "tokenmeter.update.lastRemoteSHA") }
+    }
+    public var cacheInstalledCommit: String? {
+        get { UserDefaults.standard.string(forKey: "tokenmeter.update.cacheInstalledCommit") }
+        set { UserDefaults.standard.set(newValue, forKey: "tokenmeter.update.cacheInstalledCommit") }
     }
 }
 
@@ -73,6 +78,7 @@ public struct UpdateChecker {
         do {
             let sha = try await remoteSHA()
             storage.lastCheck = clock(); storage.lastRemoteSHA = sha.lowercased()
+            storage.cacheInstalledCommit = Self.cacheKey(installed)
             return Self.evaluate(installed: installed, remote: sha)
         } catch {
             return .checkFailed((error as? LocalizedError)?.errorDescription ?? "unknown error")
@@ -87,9 +93,21 @@ public struct UpdateChecker {
         return r
     }
 
-    /// Result implied by the last stored remote SHA, without any network.
-    public func cachedResult(installed: InstalledBuild) -> UpdateResult? {
-        storage.lastRemoteSHA.map { Self.evaluate(installed: installed, remote: $0) }
+    static func cacheKey(_ i: InstalledBuild) -> String { (i.commit ?? "unknown") + (i.dirty ? "+dirty" : "") }
+
+    /// What to show at launch, and whether a live check must run right away (ignoring the 24h throttle).
+    /// A cache computed for a different installed build (app just updated/reinstalled) is discarded.
+    /// "Update available" is never shown from the cache alone: it is re-verified live first.
+    public func launchState(installed: InstalledBuild) -> (shown: UpdateResult?, verifyNow: Bool) {
+        let key = Self.cacheKey(installed)
+        if storage.cacheInstalledCommit != key {
+            storage.lastRemoteSHA = nil; storage.lastCheck = nil; storage.cacheInstalledCommit = key
+            return (nil, true)
+        }
+        guard let sha = storage.lastRemoteSHA else { return (nil, false) }
+        let r = Self.evaluate(installed: installed, remote: sha)
+        if case .updateAvailable = r { return (nil, true) }
+        return (r, false)
     }
 }
 
@@ -178,14 +196,25 @@ public final class UpdateModel: ObservableObject {
     public let installed: InstalledBuild
     private let checker: UpdateChecker?
     private var stallTask: Task<Void, Never>?
+    public private(set) var pending: Task<Void, Never>?   // launch-time live check, if one was needed
 
     /// For UI tests: fixed state, no checks or process spawns.
     public init(installed: InstalledBuild, state: State) { self.installed = installed; self.state = state; self.checker = nil }
 
     public init(installed: InstalledBuild = .current, checker: UpdateChecker = UpdateChecker()) {
         self.installed = installed; self.checker = checker
-        if let c = checker.cachedResult(installed: installed) { state = .result(c) }
-        DispatchQueue.main.async { [weak self] in self?.autoCheck() }   // check at launch (throttled to once per 24h)
+        let launch = checker.launchState(installed: installed)
+        if let r = launch.shown { state = .result(r) }
+        if launch.verifyNow {
+            state = .checking
+            let inst = installed
+            pending = Task {
+                let r = await checker.check(installed: inst)
+                if case .checkFailed = r { self.state = .idle } else { self.state = .result(r) }   // silent on failure
+            }
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.autoCheck() }   // ordinary launch check (throttled to once per 24h)
+        }
     }
 
     public var updateAvailable: Bool { if case .result(.updateAvailable) = state { return true }; return false }
