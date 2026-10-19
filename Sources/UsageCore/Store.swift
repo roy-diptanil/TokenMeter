@@ -122,6 +122,7 @@ public final class Store: ObservableObject {
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 3_000_000_000)   // let the network come back first
+                NotificationCenter.default.post(name: UpdateModel.systemEvent, object: nil)
                 await self?.refreshAll()
             }
         }
@@ -129,7 +130,12 @@ public final class Store: ObservableObject {
         let last = NSLockedBox()
         m.pathUpdateHandler = { [weak self] path in
             let ok = path.status == .satisfied
-            if last.swap(ok) == false && ok { Task { @MainActor in await self?.refreshAll() } }
+            if last.swap(ok) == false && ok {
+                Task { @MainActor in
+                    NotificationCenter.default.post(name: UpdateModel.systemEvent, object: nil)
+                    await self?.refreshAll()
+                }
+            }
         }
         m.start(queue: DispatchQueue(label: "tokenmeter.netpath"))
         pathMonitor = m

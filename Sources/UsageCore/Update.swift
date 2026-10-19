@@ -196,13 +196,26 @@ public final class UpdateModel: ObservableObject {
     public let installed: InstalledBuild
     private let checker: UpdateChecker?
     private var stallTask: Task<Void, Never>?
+    /// How often the background timer wakes up; the 24h throttle in `UpdateChecker.checkIfDue` decides whether a real check happens.
+    nonisolated public static let pollInterval: TimeInterval = 3600
+    /// Posted by Store on wake from sleep and when the network returns (so there is a single set of observers).
+    nonisolated public static let systemEvent = Notification.Name("tokenmeter.systemEvent")
+    private var pollTimer: Timer?
+    private var eventObserver: NSObjectProtocol?
     public private(set) var pending: Task<Void, Never>?   // launch-time live check, if one was needed
 
     /// For UI tests: fixed state, no checks or process spawns.
     public init(installed: InstalledBuild, state: State) { self.installed = installed; self.state = state; self.checker = nil }
 
-    public init(installed: InstalledBuild = .current, checker: UpdateChecker = UpdateChecker()) {
+    public init(installed: InstalledBuild = .current, checker: UpdateChecker = UpdateChecker(), pollInterval: TimeInterval = UpdateModel.pollInterval) {
         self.installed = installed; self.checker = checker
+        // Background cadence without the popover: hourly tick + wake/network events, all throttled to once per 24h.
+        let t = Timer(timeInterval: pollInterval, repeats: true) { [weak self] _ in Task { @MainActor in self?.autoCheck() } }
+        RunLoop.main.add(t, forMode: .common)
+        pollTimer = t
+        eventObserver = NotificationCenter.default.addObserver(forName: UpdateModel.systemEvent, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.autoCheck() }
+        }
         let launch = checker.launchState(installed: installed)
         if let r = launch.shown { state = .result(r) }
         if launch.verifyNow {
@@ -217,16 +230,22 @@ public final class UpdateModel: ObservableObject {
         }
     }
 
+    deinit {
+        pollTimer?.invalidate()
+        if let o = eventObserver { NotificationCenter.default.removeObserver(o) }
+    }
+
     public var updateAvailable: Bool { if case .result(.updateAvailable) = state { return true }; return false }
     public var busy: Bool { state == .checking || state == .updating }
 
     /// Non-blocking, silent on failure, at most once per 24h.
-    public func autoCheck() {
-        guard let checker = checker, !busy, state != .stalled else { return }
+    @discardableResult
+    public func autoCheck() -> Task<Void, Never>? {
+        guard let checker = checker, !busy, state != .stalled else { return nil }
         let inst = installed
-        Task {
+        return Task {
             guard let r = await checker.checkIfDue(installed: inst) else { return }
-            if case .checkFailed = r { return }
+            if case .checkFailed = r { return }   // background failures stay silent
             if !self.busy { self.state = .result(r) }
         }
     }

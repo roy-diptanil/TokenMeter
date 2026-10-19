@@ -36,7 +36,7 @@ If you enabled "Launch at login", you may also need to remove TokenMeter from Sy
 ### Updating
 
 Click "Check for updates" in the popover footer. TokenMeter compares the commit it was built from (shown as "Version abc1234")
-with `main` on GitHub using `git ls-remote`, at most once a day on its own and silently. If a newer commit exists, "Update now"
+with `main` on GitHub using `git ls-remote`, at most once a day on its own and silently. TokenMeter checks for updates about once a day in the background. If a newer commit exists, "Update now"
 runs the same install command as above in the background, then restarts the app after the build. Progress goes to
 `~/Library/Logs/TokenMeter-update.log`; if the app is still running after about five minutes, the footer says so and offers "Open log".
 A failed build leaves the old app in place. Builds from a local checkout with changes show as "Dev build" and never prompt.
