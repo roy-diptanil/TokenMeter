@@ -182,11 +182,11 @@ struct AccountCard: View {
         if snap.models == nil, snap.modelsUnavailable == true, snap.modelsError == nil {
             Text("Per-model breakdown not available for this plan").font(.caption).foregroundStyle(.secondary)
         } else {
-        Picker("", selection: $store.windowSel) {
+        Picker("", selection: Binding(get: { store.window(for: account) }, set: { store.setWindow($0, for: account) })) {
             ForEach(UsageWindow.allCases) { Text($0.rawValue).tag($0) }
         }.pickerStyle(.segmented).labelsHidden()
         if let m = snap.models {
-            let rows = m.rows(store.windowSel)
+            let rows = m.rows(store.window(for: account))
             if rows.isEmpty {
                 Text("No usage in this window").font(.caption).foregroundStyle(.secondary)
             } else {

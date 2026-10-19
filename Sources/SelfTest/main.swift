@@ -366,5 +366,29 @@ check(MenuLabelLogic.text(l3) == "!" && l3.count == 1 && l3[0].level == .red, "l
 let l4 = alertLab([ha, hb, hc], [10, 50, 90], [hs(60, login: true), hs(60), hs(60)])
 check(l4.count == 3 && l4.filter { !$0.isAlert }.count == 2 && MenuLabelLogic.text(l4).count <= 18, "label: cap keeps 2 percentages + !")
 
+// --- per-account usage window
+await MainActor.run {
+    let suite = "tokenmeter.selftest.\(UUID().uuidString)"
+    let ud = UserDefaults(suiteName: suite)!
+    let wa = Account(kind: .claude, label: "WA"), wb = Account(kind: .codex, label: "WB")
+    let st = Store(accounts: [wa, wb], snapshots: [:]); st.windowDefaults = ud
+    check(st.window(for: wa) == .d7 && st.window(for: wb) == .d7, "window: default 7d")
+    st.setWindow(.d1, for: wa)
+    check(st.window(for: wa) == .d1 && st.window(for: wb) == .d7, "window: changing A leaves B alone")
+    st.setWindow(.mtd, for: wb)
+    let reloaded = WindowSelections.load(from: ud)
+    check(reloaded[wa.id] == .d1 && reloaded[wb.id] == .mtd, "window: persistence round trip")
+    st.remove(wa)
+    check(st.windowSelections[wa.id] == nil && WindowSelections.load(from: ud)[wa.id] == nil && WindowSelections.load(from: ud)[wb.id] == .mtd, "window: removal clears only that entry")
+    ud.set([wb.id: "bogus", "x": "1d"], forKey: "tokenmeter.windowSelections")
+    let odd = WindowSelections.load(from: ud)
+    check(odd[wb.id] == nil && odd["x"] == .d1, "window: unknown stored value dropped")
+    st.windowSelections = odd
+    check(st.window(for: wb) == .d7, "window: unknown value falls back to 7d")
+    ud.set("not a dict", forKey: "tokenmeter.windowSelections")
+    check(WindowSelections.load(from: ud).isEmpty, "window: malformed stored value tolerated")
+    UserDefaults.standard.removePersistentDomain(forName: suite)
+}
+
 print(failures == 0 ? "ALL TESTS PASSED" : "\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)

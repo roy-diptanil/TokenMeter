@@ -26,6 +26,7 @@ enum UITest {
             s4.cap = c4; s4.capUpdated = Date().addingTimeInterval(-3 * 3600); s4.capError = "unavailable: Network error"; s4.modelsError = s4.capError
             s4.refreshFailure = "Network error"; s4.refreshFailureIsAuth = false
             let store = Store(accounts: [a1, a2, a3, a4], snapshots: [a1.id: s1, a2.id: s2, a3.id: s3, a4.id: s4])
+            store.setWindow(.d7, for: a1); store.setWindow(.d1, for: a2)   // independent per-account selections
             store.refreshResult = "2 of 4 need attention"
             let updater = UpdateModel(installed: InstalledBuild(commit: String(repeating: "a", count: 40), dirty: false),
                                       state: .result(.updateAvailable(String(repeating: "b", count: 40))))
