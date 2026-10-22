@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import ServiceManagement
 import UsageCore
 
 func healthColor(_ h: HealthStatus) -> Color { h == .red ? .red : .green }
@@ -263,7 +262,7 @@ struct PopoverView: View {
     @ObservedObject var store: Store
     @ObservedObject var updater: UpdateModel
     @State private var contentHeight: CGFloat = 300
-    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @ObservedObject var login: LoginItemController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -287,20 +286,22 @@ struct PopoverView: View {
             }
             if let m = store.refreshResult { Text(m).font(.caption).foregroundStyle(.secondary) }
             updateRow
-            HStack {
-                Toggle("Launch at login", isOn: $launchAtLogin)
-                    .toggleStyle(.checkbox).font(.caption)
-                    .onChange(of: launchAtLogin) { _, on in
-                        do { if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() } }
-                        catch { launchAtLogin = SMAppService.mainApp.status == .enabled }
-                    }
-                Spacer()
-                Text("Version \(updater.installed.short)").font(.caption2).foregroundStyle(.tertiary)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Toggle("Launch at login", isOn: Binding(get: { login.isOn }, set: { login.setEnabled($0) }))
+                        .toggleStyle(.checkbox).font(.caption).disabled(!login.canToggle)
+                    if login.needsApproval { Text("Needs approval").font(.caption).foregroundStyle(.orange) }
+                    Spacer()
+                    Text("Version \(updater.installed.short)").font(.caption2).foregroundStyle(.tertiary)
+                }
+                if !login.canToggle { Text("Only available for the installed copy in /Applications").font(.caption2).foregroundStyle(.secondary) }
+                if login.needsApproval { Button("Open Login Items settings") { login.openSettings() }.controlSize(.small) }
+                if let m = login.message { Text(m).font(.caption2).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             }
         }
         .padding(12).frame(width: 360)
-        .onAppear { store.refreshIfStale(); updater.autoCheck() }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in store.refreshIfStale() }
+        .onAppear { store.refreshIfStale(); updater.autoCheck(); login.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in store.refreshIfStale(); login.refresh() }
     }
 
     @ViewBuilder var updateRow: some View {

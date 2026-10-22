@@ -31,7 +31,11 @@ To uninstall (keeps your data; add `--purge-data` to delete it too):
     # or
     curl -fsSL https://raw.githubusercontent.com/roy-diptanil/TokenMeter/main/uninstall.sh | bash
 
-If you enabled "Launch at login", you may also need to remove TokenMeter from System Settings > General > Login Items.
+If you enabled "Launch at login", you may also need to remove TokenMeter from System Settings > General > Login Items & Extensions.
+
+Launch at login only works for the installed copy (in `/Applications` or `~/Applications`); the checkbox is disabled for builds run from a source folder.
+TokenMeter remembers that you turned it on and re-registers it at launch after an update or reinstall. If macOS asks for approval, use the
+"Open Login Items settings" button (System Settings > General > Login Items & Extensions). To diagnose, run `TokenMeter --login-item status`.
 
 ### Updating
 

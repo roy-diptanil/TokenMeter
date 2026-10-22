@@ -49,7 +49,8 @@ enum UITest {
                 print("card rendered"); exit(0)
             }
             store.confirmingRemoval = nil
-            let host = NSHostingView(rootView: PopoverView(store: store, updater: updater)
+            let login = LoginItemController(service: PreviewLoginItem(), storage: DefaultsLoginItemStorageStub(), bundlePath: "/Applications/TokenMeter.app", commit: "x")
+            let host = NSHostingView(rootView: PopoverView(store: store, updater: updater, login: login)
                 .background(Color(nsColor: .windowBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 14))
                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.black.opacity(0.35), lineWidth: 1))
@@ -76,3 +77,11 @@ enum UITest {
         NSApplication.shared.run()
     }
 }
+
+private struct PreviewLoginItem: LoginItemService {
+    var status: LoginItemStatus { .notRegistered }
+    func register() throws {}
+    func unregister() throws {}
+    func openSystemSettings() {}
+}
+private final class DefaultsLoginItemStorageStub: LoginItemStorage { var intent: Bool?; var path: String?; var commit: String? }
