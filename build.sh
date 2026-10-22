@@ -1,9 +1,13 @@
 #!/bin/bash
 # Builds TokenMeter.app (ad-hoc signed) next to this script.
+#   ./build.sh               native build for this Mac
+#   UNIVERSAL=1 ./build.sh   universal (arm64 + x86_64) build, used for releases
 set -euo pipefail
 cd "$(dirname "$0")"
-swift build -c release
-BIN="$(swift build -c release --show-bin-path)/TokenMeter"
+ARCHFLAGS=()
+if [ "${UNIVERSAL:-0}" = "1" ]; then ARCHFLAGS=(--arch arm64 --arch x86_64); fi
+swift build -c release ${ARCHFLAGS[@]+"${ARCHFLAGS[@]}"}
+BIN="$(swift build -c release ${ARCHFLAGS[@]+"${ARCHFLAGS[@]}"} --show-bin-path)/TokenMeter"
 APP="$PWD/build/TokenMeter.app"
 rm -rf "$APP"
 # Source commit this build came from (read by the in-app update check).

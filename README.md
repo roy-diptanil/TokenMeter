@@ -16,14 +16,24 @@ A macOS menu-bar app that shows your Claude and Codex usage caps, with per-model
 
 What the script does (it is short, read it first if you like):
 
-- Builds TokenMeter from source on your Mac (checkout in `~/.tokenmeter-src`) and installs it to `/Applications`.
+- Uses a prebuilt universal (Apple silicon + Intel) app from the latest GitHub release when one is available and current. No Xcode, Swift or git needed.
+- Otherwise builds TokenMeter from source on your Mac (checkout in `~/.tokenmeter-src`). Requires the Swift toolchain, see Troubleshooting.
+- Installs to `/Applications`.
 - Never touches your sign-ins or data in `~/Library`.
 - Safe to re-run to update.
 - If `/Applications` isn't writable (and `sudo` can't prompt), it installs to `~/Applications` instead and says so.
 
+Releases are built by GitHub Actions from `main` (see `.github/workflows/release.yml`). Before installing a prebuilt app the installer
+verifies its SHA-256 checksum, checks that the commit embedded in the app matches the release's commit marker (and that `main` is not newer,
+otherwise it builds from source), and checks the bundle id and code signature. If any check fails it falls back to building from source.
+
+Environment variables (all optional): `TOKENMETER_FROM_SOURCE=1` (skip the prebuilt), `TOKENMETER_RELEASE_BASE` (download base URL),
+`TOKENMETER_MAIN_SHA` (testing), `TOKENMETER_DEST` (install dir), `TOKENMETER_SRC` (source checkout dir), `TOKENMETER_REPO` (git URL),
+`TOKENMETER_NO_LAUNCH=1` (testing).
+
 Then click the gauge icon in the menu bar and choose "Add account...".
 
-Requires macOS 14+ and the Xcode Command Line Tools (the script starts their install if missing, then asks you to re-run it). No other dependencies.
+Requires macOS 14+. The prebuilt path needs nothing else; building from source needs the Xcode Command Line Tools (the script starts their install if missing, then asks you to re-run it) and, on recent macOS SDKs, full Xcode.
 
 To uninstall (keeps your data; add `--purge-data` to delete it too):
 
@@ -45,9 +55,20 @@ runs the same install command as above in the background, then restarts the app 
 `~/Library/Logs/TokenMeter-update.log`; if the app is still running after about five minutes, the footer says so and offers "Open log".
 A failed build leaves the old app in place. Builds from a local checkout with changes show as "Dev build" and never prompt.
 
+### Troubleshooting
+
+If a source build fails with `external macro implementation type 'SwiftUIMacros.StateMacro' could not be found` or
+`plugin for module 'SwiftUIMacros' not found`: your Command Line Tools cannot build SwiftUI apps with this macOS SDK (the SwiftUI macro
+plugin ships only with Xcode). Install Xcode from the App Store, open it once, run `sudo xcode-select -s /Applications/Xcode.app`, then
+re-run the installer. (If a prebuilt release is available the installer uses that automatically, so this only affects source builds.)
+The installer keeps the build log and prints its path.
+
 ### Development
 
     ./build.sh                                          # builds build/TokenMeter.app (ad-hoc signed)
+    UNIVERSAL=1 ./build.sh                              # universal arm64 + x86_64 (needs full Xcode)
+    scripts/package-release.sh                          # zip + sha256 + commit marker in build/ (clean tree only)
+    scripts/test-install.sh                             # installer tests (temp dirs only)
     swift run SelfTest                                  # parser/logic tests (synthetic fixtures only)
     build/TokenMeter.app/Contents/MacOS/TokenMeter --dump   # one-shot fetch, prints numbers only
 
