@@ -480,6 +480,70 @@ await MainActor.run {
     st.remove(f1)
     check(!st.effectiveMenuBarIDs.contains(f1.id) && st.effectiveMenuBarIDs.count == 2, "deleted account dropped")
 }
+// --- launch at login (fake service + storage; real SMAppService is never touched)
+final class FakeLogin: LoginItemService {
+    var st: LoginItemStatus; var log: [String] = []; var registerError: Error?; var statusAfterRegister: LoginItemStatus = .enabled
+    init(_ s: LoginItemStatus) { st = s }
+    var status: LoginItemStatus { st }
+    func register() throws { log.append("register"); if let e = registerError { throw e }; st = statusAfterRegister }
+    func unregister() throws { log.append("unregister"); st = .notRegistered }
+    func openSystemSettings() { log.append("settings") }
+}
+final class FakeLoginStore: LoginItemStorage { var intent: Bool?; var path: String?; var commit: String? }
+struct LoginBoom: LocalizedError { var errorDescription: String? { "Operation not permitted" } }
+let hm = "/Users/x"
+check(LoginItemController.isInstalledLocation("/Applications/TokenMeter.app", home: hm), "login: /Applications is installed")
+check(LoginItemController.isInstalledLocation("/Users/x/Applications/TokenMeter.app", home: hm), "login: ~/Applications is installed")
+check(!LoginItemController.isInstalledLocation("/Users/x/Projects/UsageWidget/App/build/TokenMeter.app", home: hm), "login: build folder is not installed")
+check(!LoginItemController.isInstalledLocation("/private/tmp/TokenMeter.app", home: hm), "login: /private/tmp is not installed")
+check(!LoginItemController.isInstalledLocation("/Applications/build/TokenMeter.app", home: hm) && !LoginItemController.isInstalledLocation("/Applications/../tmp/T.app", home: hm), "login: build folder / .. tricks rejected")
+await MainActor.run {
+    let inst = "/Applications/TokenMeter.app"
+    @MainActor func mk(_ s: LoginItemStatus, path: String = inst, commit: String = "c1") -> (LoginItemController, FakeLogin, FakeLoginStore) {
+        let f = FakeLogin(s), st = FakeLoginStore()
+        return (LoginItemController(service: f, storage: st, bundlePath: path, commit: commit, home: hm), f, st)
+    }
+    // build-folder copy: disabled, never registers
+    let (b, bf, bs) = mk(.notRegistered, path: "/Users/x/Projects/UsageWidget/App/build/TokenMeter.app")
+    b.setEnabled(true); b.selfHeal()
+    check(!b.canToggle && bf.log.isEmpty && bs.intent == nil, "login: build-folder copy: toggle disabled, register() never called")
+    // requires approval is surfaced, not 'off'
+    let (a, af, _) = mk(.requiresApproval)
+    check(a.needsApproval && !a.isOn && a.canToggle, "login: requiresApproval surfaced")
+    a.openSettings(); check(af.log == ["settings"], "login: opens Login Items settings")
+    // register error surfaced; status re-read
+    let (e, ef, es) = mk(.notRegistered); ef.registerError = LoginBoom()
+    e.setEnabled(true)
+    check(e.message == "Operation not permitted" && !e.isOn && es.intent == nil, "login: register error shown, intent not recorded")
+    ef.registerError = nil; e.setEnabled(true)
+    check(e.message == nil && e.isOn && es.intent == true && es.path == inst && es.commit == "c1", "login: success clears error, records intent/path/commit")
+    e.setEnabled(false)
+    check(!e.isOn && es.intent == false, "login: off recorded")
+    ef.st = .enabled; e.refresh(); check(e.isOn, "login: refresh re-reads the system status")
+    // self-heal
+    let (h1, hf1, hs1) = mk(.notRegistered); hs1.intent = true; hs1.path = inst; hs1.commit = "c1"
+    h1.selfHeal()
+    check(hf1.log == ["unregister", "register"] && h1.isOn && h1.message == nil, "heal: intent true + notRegistered -> unregister then register")
+    let (h2, hf2, hs2) = mk(.enabled); hs2.intent = true; hs2.path = "/Users/x/Applications/TokenMeter.app"; hs2.commit = "c1"
+    h2.selfHeal()
+    check(hf2.log == ["unregister", "register"] && hs2.path == inst, "heal: re-registers when the path differs, stores new path")
+    let (h3, hf3, hs3) = mk(.enabled, commit: "c2"); hs3.intent = true; hs3.path = inst; hs3.commit = "c1"
+    h3.selfHeal()
+    check(hf3.log == ["unregister", "register"] && hs3.commit == "c2", "heal: re-registers when the commit differs")
+    let (h4, hf4, hs4) = mk(.enabled); hs4.intent = true; hs4.path = inst; hs4.commit = "c1"
+    h4.selfHeal(); check(hf4.log.isEmpty, "heal: nothing to do when enabled and same path/commit")
+    let (h5, hf5, hs5) = mk(.notRegistered); hs5.intent = false
+    h5.selfHeal(); check(hf5.log.isEmpty, "heal: does nothing when intent is false")
+    let (h6, hf6, _) = mk(.notRegistered); h6.selfHeal(); check(hf6.log.isEmpty, "heal: does nothing when intent absent and not enabled")
+    let (h7, hf7, hs7) = mk(.enabled); h7.selfHeal()
+    check(hs7.intent == true && hs7.path == inst && hf7.log.isEmpty, "heal: enabled but unrecorded -> record intent")
+    let (h8, hf8, hs8) = mk(.notRegistered); hs8.intent = true; hf8.registerError = LoginBoom(); h8.selfHeal()
+    check(hf8.log == ["unregister", "register"] && h8.message?.contains("Operation not permitted") == true, "heal: failure shown inline")
+    let (h9, hf9, hs9) = mk(.notRegistered, path: "/Users/x/Projects/App/build/TokenMeter.app"); hs9.intent = true; h9.selfHeal()
+    check(hf9.log.isEmpty, "heal: never from a non-installed location")
+}
+check(LoginItemCLI.format(status: .enabled, installed: true, path: "/Users/x/Applications/TokenMeter.app", home: "/Users/x") == "status=enabled installedLocation=true path=~/Applications/TokenMeter.app", "cli format: home abbreviated")
+check(LoginItemCLI.format(status: .requiresApproval, installed: false, path: "/private/tmp/T.app", home: "/Users/x") == "status=requiresApproval installedLocation=false path=/private/tmp/T.app", "cli format: other path kept")
 
 print(failures == 0 ? "ALL TESTS PASSED" : "\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)
