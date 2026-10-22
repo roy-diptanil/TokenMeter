@@ -41,9 +41,15 @@ Then click the gauge icon in the menu bar and choose "Add account...".
 
 ### Compatibility
 
-macOS 14 or newer. The prebuilt app is a universal binary built on macOS 15 (Xcode 16-series) and smoke-tested on the macOS versions
-listed in `.github/workflows/ci.yml` (it must report its version and run `--login-item status` on each). Building from source needs
-the Swift toolchain and, on recent macOS SDKs, the full Xcode app.
+macOS 14 (Sonoma) or later is supported, for the prebuilt app and for source builds. The prebuilt app is a universal binary built on
+macOS 15 (Xcode 16-series). It is smoke-tested (it must report its version and run `--login-item status`) on macOS 14, 15 and 26 for as
+long as GitHub provides a macOS 14 runner (GitHub retires that image on 2026-11-02, so the macOS 14 CI job switches itself off after that date).
+From then on a CI guard (`scripts/check-min-os.sh`) verifies that the app's deployment target stays at 14.0, and compile-time API availability
+checks enforce the rest.
+
+Source builds need Swift 6, i.e. Xcode 16 or newer (the full Xcode app, not just the Command Line Tools). On macOS 14 that means
+macOS 14.5 or later for Xcode 16; check Apple's system requirements for the Xcode version you want. The installer picks the newest
+installed Xcode automatically.
 
 To uninstall (keeps your data; add `--purge-data` to delete it too):
 

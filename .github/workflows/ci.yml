@@ -1,6 +1,15 @@
 # Continuous integration: build, test, package, and smoke-test the packaged app on several macOS versions.
 # Never publishes anything (releases are made by release.yml when VERSION changes on main).
 # Only first-party actions. The prebuilt app is built once on macos-15 and then launched on every runner OS in `smoke`.
+#
+# macOS 14 is a supported platform. GitHub retires the macos-14 runner image on 2026-11-02, so:
+#   - `gate` (ubuntu) outputs the list of runner OSes as JSON: macos-14 is included only while the UTC date is
+#     before 20261102, so after that date the macos-14 jobs simply do not exist (nothing skipped, nothing queued);
+#   - `build` and `smoke` use that list as their matrix (fromJSON);
+#   - scripts/check-min-os.sh (run on macos-15 after packaging) permanently guards the deployment target (14.0),
+#     so compatibility does not depend on a macos-14 runner existing.
+# The macos-14 runner's default Xcode (15.4, Swift 5.10) is too old for this package (Swift tools 6.0), so that
+# entry selects /Applications/Xcode_16.2.app first.
 name: ci
 
 on:
@@ -16,27 +25,50 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  gate:
+    name: gate (runner list)
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.g.outputs.os }}
+    steps:
+      - id: g
+        run: |
+          today="$(date -u +%Y%m%d)"
+          if [ "$today" -lt 20261102 ]; then
+            os="$(printf '["%s","%s","%s"]' macos-15 macos-26 macos-14)"
+          else
+            os="$(printf '["%s","%s"]' macos-15 macos-26)"
+          fi
+          echo "UTC date $today -> os=$os"
+          echo "os=$os" >> "$GITHUB_OUTPUT"
+
   build:
     name: build (${{ matrix.os }})
+    needs: gate
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
-        experimental: [false]
-        include:
-          # GitHub deprecates the macos-14 runner image on 2026-11-02; failures here do not fail the run.
-          - os: macos-14
-            experimental: true
+        os: ${{ fromJSON(needs.gate.outputs.os) }}
     steps:
       - uses: actions/checkout@v4
 
+      # The macos-14 runner's default Xcode (15.4, Swift 5.10) is too old for this package (Swift tools 6.0).
+      - name: Select Xcode 16.2 (macos-14 only)
+        if: matrix.os == 'macos-14'
+        run: |
+          XCODE=/Applications/Xcode_16.2.app
+          if [ ! -d "$XCODE" ]; then
+            echo "::error::$XCODE not found. Installed Xcode apps: $(ls -d /Applications/Xcode*.app | tr '\n' ' ')"
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+
       - name: Toolchain versions
         run: |
-          swift --version
-          xcodebuild -version
           xcode-select -p
+          xcodebuild -version
+          swift --version
           sw_vers
 
       - name: Build
@@ -53,6 +85,10 @@ jobs:
         if: matrix.os == 'macos-15'
         run: scripts/package-release.sh
 
+      - name: Check deployment target is macOS 14.0
+        if: matrix.os == 'macos-15'
+        run: bash scripts/check-min-os.sh build/TokenMeter.app
+
       - name: Upload release files
         if: matrix.os == 'macos-15'
         uses: actions/upload-artifact@v4
@@ -67,17 +103,12 @@ jobs:
 
   smoke:
     name: smoke (${{ matrix.os }})
-    needs: build
+    needs: [gate, build]
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
-        experimental: [false]
-        include:
-          - os: macos-14
-            experimental: true
+        os: ${{ fromJSON(needs.gate.outputs.os) }}
     steps:
       - name: Download release files
         uses: actions/download-artifact@v4
