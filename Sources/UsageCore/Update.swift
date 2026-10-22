@@ -242,12 +242,13 @@ public final class UpdateModel: ObservableObject {
     nonisolated public static let systemEvent = Notification.Name("tokenmeter.systemEvent")
     private var pollTimer: Timer?
     private var eventObserver: NSObjectProtocol?
-    public private(set) var pending: Task<Void, Never>?   // launch-time live check, if one was needed
+    public private(set) var pending: Task<Void, Never>?   // launch-time check (forced or ordinary), if one was scheduled
 
     /// For UI tests: fixed state, no checks or process spawns.
     public init(installed: InstalledBuild, state: State) { self.installed = installed; self.state = state; self.checker = nil }
 
-    public init(installed: InstalledBuild = .current, checker: UpdateChecker = UpdateChecker(), pollInterval: TimeInterval = UpdateModel.pollInterval) {
+    public init(installed: InstalledBuild = .current, checker: UpdateChecker = UpdateChecker(), pollInterval: TimeInterval = UpdateModel.pollInterval,
+                checkAtLaunch: Bool = true) {
         self.installed = installed; self.checker = checker
         // Background cadence without the popover: hourly tick + wake/network events, all throttled to once per 24h.
         let t = Timer(timeInterval: pollInterval, repeats: true) { [weak self] _ in Task { @MainActor in self?.autoCheck() } }
@@ -265,8 +266,10 @@ public final class UpdateModel: ObservableObject {
                 let r = await checker.check(installed: inst)
                 if case .checkFailed = r { self.state = .idle } else { self.state = .result(r) }   // silent on failure
             }
-        } else {
-            DispatchQueue.main.async { [weak self] in self?.autoCheck() }   // ordinary launch check (throttled to once per 24h)
+        } else if checkAtLaunch {
+            // Ordinary launch check (throttled to once per 24h). `pending` lets tests await it; tests that need a
+            // fixed initial state pass checkAtLaunch: false.
+            pending = Task { @MainActor [weak self] in await self?.autoCheck()?.value }
         }
     }
 
