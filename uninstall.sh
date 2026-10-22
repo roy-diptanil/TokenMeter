@@ -2,9 +2,11 @@
 #
 # TokenMeter uninstaller
 #
-#   ~/.tokenmeter-src/uninstall.sh [--purge-data] [--yes]
 #   curl -fsSL https://raw.githubusercontent.com/roy-diptanil/TokenMeter/main/uninstall.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/roy-diptanil/TokenMeter/main/uninstall.sh | bash -s -- --purge-data --yes
+#   ~/.tokenmeter-src/uninstall.sh [--purge-data] [--yes]   (only exists if you ever built from source)
+#
+# Run through a pipe there is no terminal to confirm on, so --purge-data needs --yes.
 #
 # What this script does:
 #   - Quits TokenMeter (gracefully, force-kill only as a last resort).
