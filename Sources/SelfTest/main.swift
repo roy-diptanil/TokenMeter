@@ -291,17 +291,22 @@ let c5 = MemStore(); c5.lastRemoteVersion = "1.3.0"; c5.cacheInstalledKey = "1.2
 check(checker({ "1.3.0" }, c5).launchState(installed: devB).shown == .devBuild(latest: "1.3.0"), "cached devBuild shown instantly")
 let c6 = MemStore(); c6.lastRemoteVersion = "garbage"; c6.cacheInstalledKey = key
 check(checker({ "1.2.3" }, c6).launchState(installed: clean).verifyNow && c6.lastRemoteVersion == nil, "corrupt cached version discarded")
-await MainActor.run {
+let staleModel: (UpdateModel, MemStore) = await MainActor.run {
     // stale cache says update available, but remote now equals installed: never shows 'Update available'
     let st = MemStore(); st.lastRemoteVersion = "1.3.0"; st.lastCheck = now.addingTimeInterval(-60); st.cacheInstalledKey = key
-    let m = UpdateModel(installed: clean, checker: checker({ "1.2.3" }, st))
+    let m = UpdateModel(installed: clean, checker: checker({ "1.2.3" }, st), checkAtLaunch: false)
     check(m.state == .checking && !m.updateAvailable, "model: stale cache -> checking, not 'Update available'")
-    Task { @MainActor in
-        await m.pending?.value
-        check(m.state == .result(.upToDate) && st.lastRemoteVersion == "1.2.3", "model: live check resolves to upToDate")
-    }
+    return (m, st)
 }
-try? await Task.sleep(nanoseconds: 200_000_000)
+await staleModel.0.pending?.value
+await MainActor.run { check(staleModel.0.state == .result(.upToDate) && staleModel.1.lastRemoteVersion == "1.2.3", "model: live check resolves to upToDate") }
+// the default launch check (checkAtLaunch: true) runs on purpose: overdue cache -> awaited, then 'Update available'
+let launchModel: (UpdateModel, MemStore) = await MainActor.run {
+    let st = MemStore(); st.lastRemoteVersion = "1.2.3"; st.lastCheck = now.addingTimeInterval(-25 * 3600); st.cacheInstalledKey = key
+    return (UpdateModel(installed: clean, checker: checker({ "1.3.0" }, st)), st)
+}
+await launchModel.0.pending?.value
+await MainActor.run { check(launchModel.0.state == .result(.updateAvailable("1.3.0")), "model: default launch check runs and finds the newer release") }
 // background check (no popover): throttle boundaries and model tick
 check(await MainActor.run { UpdateModel.pollInterval } == 3600, "poll interval is hourly")
 let bgNotDue = MemStore(); bgNotDue.lastCheck = now.addingTimeInterval(-24 * 3600 + 1)
@@ -312,7 +317,7 @@ check(!UpdateChecker.shouldAutoCheck(last: now.addingTimeInterval(-24 * 3600 + 1
 func bgModel(lastCheck: Date, remote: @escaping () async throws -> String) async -> (UpdateModel, MemStore) {
     await MainActor.run {
         let st = MemStore(); st.lastRemoteVersion = "1.2.3"; st.lastCheck = lastCheck; st.cacheInstalledKey = key
-        return (UpdateModel(installed: clean, checker: checker(remote, st)), st)
+        return (UpdateModel(installed: clean, checker: checker(remote, st), checkAtLaunch: false), st)
     }
 }
 let (mDue, _) = await bgModel(lastCheck: now.addingTimeInterval(-25 * 3600)) { "1.3.0" }
