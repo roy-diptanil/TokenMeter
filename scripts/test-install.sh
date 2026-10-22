@@ -259,5 +259,37 @@ chmod 755 "$sb/sys" "$sb/sys/TokenMeter.app" "$sb/sys/TokenMeter.app/Contents"
 check "(11) unwritable system copy: tells the user to run uninstall.sh" has "Run uninstall.sh, then re-run this installer"
 check "(11) unwritable system copy: fails without quitting or changing anything" test "$RC" -ne 0 -a ! -s "$LOG" -a ! -e "$UAPPS"
 
+# (12) Swift toolchain too old (Xcode 15.x has Swift 5.10; the package needs Swift 6 / Xcode 16+)
+printf "error: package 'tokenmeter' is using Swift tools version 6.0.0 but the installed version is 5.10.0\n" > "$T/swiftver.log"
+check "(12) swift-version log recognised" fn build_failed_for_swift_version "$T/swiftver.log"
+check "(12) other logs are not swift-version problems" sh -c "TOKENMETER_SOURCE_ONLY=1 . '$INSTALL'; ! build_failed_for_swift_version '$T/macro.log' && ! build_failed_for_swift_version '$T/other.log'"
+XM="$T/xc14/Applications"
+mkdir -p "$XM/Xcode_15.4.app/Contents/Developer" "$XM/Xcode_16.2.app/Contents/Developer" "$XM/Xcode_16.1.app/Contents/Developer"
+setver "$XM/Xcode_15.4.app" 15.4; setver "$XM/Xcode_16.2.app" 16.2; setver "$XM/Xcode_16.1.app" 16.1
+check "(12) retry: Swift-version failure on Xcode 15.4 -> retry with Xcode 16.2" test "$(fn xcode_for_retry "$T/swiftver.log" "$XM/Xcode_15.4.app/Contents/Developer" "$XM")" = "$XM/Xcode_16.2.app/Contents/Developer"
+check "(12) retry: Swift-version failure on CLT -> retry with Xcode 16.2" test "$(fn xcode_for_retry "$T/swiftver.log" "$CLT" "$XM")" = "$XM/Xcode_16.2.app/Contents/Developer"
+check "(12) retry: 16.2 already tried -> no retry" test -z "$(fn xcode_for_retry "$T/swiftver.log" "$XM/Xcode_16.2.app/Contents/Developer" "$XM")"
+check "(12) xcode: CLT selected -> 16.2 preferred over 15.4 and 16.1" test "$(fn xcode_for_build "$CLT" "$XM")" = "$XM/Xcode_16.2.app/Contents/Developer"
+XO="$T/xc15/Applications"; mkdir -p "$XO/Xcode_15.4.app/Contents/Developer"; setver "$XO/Xcode_15.4.app" 15.4
+check "(12) xcode: only 15.4 installed -> still returned (the build then reports it is too old)" test "$(fn xcode_for_build "$CLT" "$XO")" = "$XO/Xcode_15.4.app/Contents/Developer"
+check "(12) retry: only 15.4 installed and already tried -> no retry" test -z "$(fn xcode_for_retry "$T/swiftver.log" "$XO/Xcode_15.4.app/Contents/Developer" "$XO")"
+SV="$(fn report_build_failure "$T/swiftver.log" 2>&1)"
+check "(12) message: Swift 6.0 / Xcode 16 / macOS 14.5 / license / toolchain line / log path" sh -c "printf '%s' \"\$1\" | grep -q 'Your Swift toolchain is too old: TokenMeter needs Swift 6.0, which comes with Xcode 16 or newer.' && printf '%s' \"\$1\" | grep -q 'Xcode 16 needs macOS 14.5 or later' && printf '%s' \"\$1\" | grep -q 'accept the license' && printf '%s' \"\$1\" | grep -q 'Your toolchain: ' && printf '%s' \"\$1\" | grep -q 'Build log: '" _ "$SV"
+
+# end-to-end: only Xcode 15.4 installed (in the fake home), build.sh reports the old Swift -> message, exit non-zero, installed app untouched
+FAKE2="$T/fakerepo2"; mkdir -p "$FAKE2"
+printf '#!/bin/bash\necho "building..."\necho "error: package '"'"'tokenmeter'"'"' is using Swift tools version 6.0.0 but the installed version is 5.10.0"\nexit 1\n' > "$FAKE2/build.sh"
+chmod +x "$FAKE2/build.sh"
+git -C "$FAKE2" init -q -b main
+git -C "$FAKE2" -c user.name=t -c user.email=t@example.com add build.sh
+git -C "$FAKE2" -c user.name=t -c user.email=t@example.com commit -q -m fake
+sb="$T/run-old15"; rm -rf "$sb"; mkdir -p "$sb/home/Applications/Xcode_15.4.app/Contents/Developer" "$sb/dest/TokenMeter.app"
+setver "$sb/home/Applications/Xcode_15.4.app" 15.4; printf 'old' > "$sb/dest/TokenMeter.app/sentinel"; RC=0
+OUT="$(env -i PATH="$PATH" HOME="$sb/home" TMPDIR="$sb" TOKENMETER_NO_LAUNCH=1 TOKENMETER_DEST="$sb/dest" \
+  TOKENMETER_SRC="$sb/src" TOKENMETER_REPO="$FAKE2" TOKENMETER_FROM_SOURCE=1 bash "$INSTALL" </dev/null 2>&1)" || RC=$?
+check "(12) e2e: fails with exit 1" test "$RC" -eq 1
+check "(12) e2e: too-old message printed" has "Your Swift toolchain is too old"
+check "(12) e2e: installed app untouched" test "$(cat "$sb/dest/TokenMeter.app/sentinel")" = "old"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAILS"
 [ "$FAILS" -eq 0 ]

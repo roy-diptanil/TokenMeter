@@ -54,6 +54,10 @@ jobs:
         if: steps.tag.outputs.exists == 'false'
         run: bash scripts/package-release.sh
 
+      - name: Check deployment target is macOS 14.0
+        if: steps.tag.outputs.exists == 'false'
+        run: bash scripts/check-min-os.sh build/TokenMeter.app
+
       - name: Create release
         if: steps.tag.outputs.exists == 'false'
         env:

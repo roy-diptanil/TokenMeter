@@ -176,7 +176,9 @@ ver_gt() {
 }
 
 # best_xcode DIR...: print the Contents/Developer path of the highest-version Xcode*.app in the given
-# directories (nothing if none).
+# directories (nothing if none). Highest wins, so an Xcode 16+ is always preferred over an older one
+# (TokenMeter needs Swift 6, i.e. Xcode 16+); an older Xcode is still returned when it is the only one,
+# and the build then reports the "toolchain too old" message.
 best_xcode() {
   local d app v best="" bestv="-1"
   for d in "$@"; do
@@ -198,12 +200,12 @@ xcode_for_build() {
 }
 
 # xcode_for_retry LOG TRIED_DEVELOPER_DIR DIR...: after a failed build, an Xcode worth retrying with:
-# only when the log shows the missing SwiftUI macro plugin, the user did not set DEVELOPER_DIR, and the
-# best installed Xcode is not the toolchain that was just tried.
+# only when the log shows the missing SwiftUI macro plugin or a Swift toolchain that is too old, the user
+# did not set DEVELOPER_DIR, and the best installed Xcode is not the toolchain that was just tried.
 xcode_for_retry() {
   local log="$1" tried="$2"; shift 2
   [ -z "${DEVELOPER_DIR:-}" ] || return 0
-  build_failed_for_toolchain "$log" || return 0
+  build_failed_for_toolchain "$log" || build_failed_for_swift_version "$log" || return 0
   local best; best="$(best_xcode "$@")"
   if [ -n "$best" ] && [ "$best" != "$tried" ]; then printf '%s' "$best"; fi
 }
@@ -211,6 +213,11 @@ xcode_for_retry() {
 # build_failed_for_toolchain LOG: success if LOG shows the missing SwiftUI macro plugin (no full Xcode).
 build_failed_for_toolchain() {
   grep -Eq 'SwiftUIMacros|plugin for module|external macro implementation' "$1" 2>/dev/null
+}
+
+# build_failed_for_swift_version LOG: success if LOG shows the Swift toolchain is older than the package needs.
+build_failed_for_swift_version() {
+  grep -Eiq 'using Swift tools version [0-9.]+ but the installed version is [0-9.]+|requires a minimum Swift tools' "$1" 2>/dev/null
 }
 
 # build_failed_for_license LOG: success if LOG shows the Xcode license has not been accepted.
@@ -227,6 +234,15 @@ report_build_failure() {
       printf '    Install Xcode from the App Store, open it once to accept the license, then re-run this installer.\n'
       printf '    You do not need to change xcode-select: the installer finds Xcode itself.\n'
       printf '    (If a prebuilt release is available the installer uses that automatically.)\n'
+      printf '    If you ask for help, include the output of: xcode-select -p   and   xcodebuild -version\n'
+      printf '    Build log: %s\n' "$log"
+    } >&2
+  elif build_failed_for_swift_version "$log"; then
+    local sv; sv="$(swift --version 2>&1 </dev/null | head -n 1 || true)"
+    {
+      printf '==> ERROR: Your Swift toolchain is too old: TokenMeter needs Swift 6.0, which comes with Xcode 16 or newer.\n'
+      printf "    Install Xcode 16 or newer (see Apple's system requirements for your macOS version; Xcode 16 needs macOS 14.5 or later), open it once to accept the license, then re-run this installer.\n"
+      printf '    Your toolchain: %s.\n' "${sv:-unknown}"
       printf '    If you ask for help, include the output of: xcode-select -p   and   xcodebuild -version\n'
       printf '    Build log: %s\n' "$log"
     } >&2
