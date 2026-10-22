@@ -5,25 +5,28 @@
 #   curl -fsSL https://raw.githubusercontent.com/roy-diptanil/TokenMeter/main/install.sh | bash
 #
 # What this script does (read it before piping to bash):
-#   Path 1, PREBUILT (tried first, needs no Swift, git or Xcode):
+#   Path 1, PREBUILT STABLE RELEASE (tried first, needs no Swift, git or Xcode):
 #     1. Checks you are on macOS 14 or newer.
-#     2. Downloads TokenMeter.commit, TokenMeter.zip and TokenMeter.zip.sha256 from the
-#        latest GitHub release (built by GitHub Actions from main, universal arm64 + x86_64).
-#     3. Asks GitHub which commit main is at. If the release is BEHIND main, it skips the
-#        prebuilt and builds from source instead. (If GitHub cannot be asked, it uses the release.)
-#     4. Verifies the SHA-256 checksum, unzips, and checks the app: its embedded commit equals
-#        the release's commit marker, it is not a dirty build, its bundle id is
-#        com.local.tokenmeter, and its code signature is intact. Any failure prints one line
-#        and falls back to Path 2. An unverified bundle is never installed.
-#   Path 2, SOURCE (used if the prebuilt is skipped, behind, or fails to verify):
+#     2. Downloads TokenMeter.commit, TokenMeter.version, TokenMeter.zip and TokenMeter.zip.sha256
+#        from the newest versioned GitHub release (GitHub redirects ".../releases/latest/download"
+#        to the newest non-prerelease). Releases are built by GitHub Actions, universal arm64 + x86_64.
+#     3. Verifies the SHA-256 checksum, unzips, and checks the app: its embedded commit equals
+#        the release's commit marker, its version equals the release's version marker (MAJOR.MINOR.PATCH),
+#        it is not a dirty build, its bundle id is com.local.tokenmeter, and its code signature
+#        is intact. Any failure prints one line and falls back to Path 2. An unverified bundle
+#        is never installed. (These checks catch corruption and mismatches, not a compromised publisher.)
+#   Path 2, SOURCE (used if the prebuilt is skipped or fails to verify; builds the tip of main):
 #     1. Checks for the Swift toolchain. If missing, it starts `xcode-select --install`
 #        and exits so you can re-run it afterwards.
 #     2. Clones (or updates) the source into  $TOKENMETER_SRC  (default ~/.tokenmeter-src).
 #        That folder is a throwaway build checkout owned by this script: an existing
 #        git checkout there is fetched and hard-reset to origin/main.
 #     3. Runs ./build.sh there (swift build, ad-hoc signed app bundle), logging to a temp file.
-#        If the build fails because the Command Line Tools cannot build SwiftUI apps
-#        (the SwiftUI macro plugin ships only with Xcode), it explains that and exits
+#        SwiftUI on recent macOS SDKs needs the FULL Xcode app. If the Command Line Tools are
+#        the selected toolchain and an Xcode app is installed, the build uses that Xcode through
+#        DEVELOPER_DIR for that one command only (no sudo, your xcode-select choice is unchanged).
+#        If the build fails because the SwiftUI macro plugin is missing, it retries once with
+#        another installed Xcode if there is one; otherwise it explains what to install and exits
 #        BEFORE touching any installed app.
 #   Then, for both paths:
 #     - Picks where to install, and checks it is usable, BEFORE touching the running
@@ -38,14 +41,14 @@
 #
 # It never touches ~/Library/Application Support/TokenMeter or WebKit data, so
 # your sign-ins survive updates. The only network access is downloading from GitHub
-# releases, one request to the GitHub API for main's commit SHA, and (source path
-# only) git clone/fetch of the repository. No telemetry.
+# releases and (source path only) git clone/fetch of the repository. No telemetry.
 #
 # Environment overrides:
-#   TOKENMETER_FROM_SOURCE=1  skip the prebuilt release and always build from source
-#   TOKENMETER_RELEASE_BASE   prebuilt download base URL
-#                             (default: https://github.com/roy-diptanil/TokenMeter/releases/download/latest)
-#   TOKENMETER_MAIN_SHA       treat this as main's commit instead of asking the GitHub API (testing)
+#   TOKENMETER_VERSION=v1.0.0  install that release instead of the newest (pin / roll back)
+#   TOKENMETER_FROM_SOURCE=1   skip the prebuilt release and build main from source
+#   TOKENMETER_RELEASE_BASE    prebuilt download base URL (default: the newest GitHub release's assets)
+#   TOKENMETER_RELEASES_URL    releases root used with TOKENMETER_VERSION (testing; default
+#                              https://github.com/roy-diptanil/TokenMeter/releases)
 #   TOKENMETER_SRC   source checkout dir   (default: $HOME/.tokenmeter-src)
 #   TOKENMETER_DEST  install parent dir    (default: /Applications)
 #   TOKENMETER_REPO  git URL               (default: https://github.com/roy-diptanil/TokenMeter.git)
@@ -57,13 +60,13 @@ usage() {
   cat <<'EOF'
 Usage: install.sh [-h|--help]
 
-Installs TokenMeter to /Applications: a verified prebuilt release if one is
-available and current, otherwise built from source.
+Installs the newest TokenMeter release to /Applications: a verified prebuilt
+app if available, otherwise built from source (main).
 
 Environment:
-  TOKENMETER_FROM_SOURCE=1  skip the prebuilt release, build from source
-  TOKENMETER_RELEASE_BASE   prebuilt download base URL (default: the GitHub "latest" release)
-  TOKENMETER_MAIN_SHA       main's commit, instead of asking the GitHub API (testing)
+  TOKENMETER_VERSION=v1.0.0 install that release instead of the newest
+  TOKENMETER_FROM_SOURCE=1  skip the prebuilt release, build main from source
+  TOKENMETER_RELEASE_BASE   prebuilt download base URL (default: newest GitHub release)
   TOKENMETER_SRC   source checkout dir (default: ~/.tokenmeter-src)
   TOKENMETER_DEST  install parent dir  (default: /Applications)
   TOKENMETER_REPO  git URL (default: https://github.com/roy-diptanil/TokenMeter.git)
@@ -97,38 +100,40 @@ install_app() {
 # plist_get APP KEY: print an Info.plist value (empty if missing).
 plist_get() { /usr/libexec/PlistBuddy -c "Print :$2" "$1/Contents/Info.plist" 2>/dev/null || true; }
 
-# fetch_sha URL [curl args...]: print a validated 40-hex SHA fetched from URL, else nothing.
-fetch_sha() {
-  local url="$1" out; shift
-  out="$(curl -fsSL --max-time 20 "$@" "$url" </dev/null 2>/dev/null | tr -d '[:space:]')" || return 1
-  printf '%s' "$out" | grep -Eq '^[0-9a-f]{40}$' || return 1
+# fetch_text URL: print the trimmed body of URL (stdout empty and status 1 on failure).
+fetch_text() {
+  local out
+  out="$(curl -fsSL --max-time 20 "$1" </dev/null 2>/dev/null | tr -d '[:space:]')" || return 1
   printf '%s' "$out"
 }
 
-# prebuilt_fetch WORKDIR: try to obtain a verified prebuilt app.
-#   returns 0 and sets PB_APP / PB_SHA on success;
-#   returns 2 and sets PB_BEHIND=1 if the release is older than main;
-#   returns 1 and sets PB_WHY otherwise. Never installs anything.
-TMPD=""
-PB_APP=""; PB_SHA=""; PB_WHY=""; PB_BEHIND=0
-prebuilt_fetch() {
-  local work="$1"
-  local base="${TOKENMETER_RELEASE_BASE:-https://github.com/roy-diptanil/TokenMeter/releases/download/latest}"
-  local rel main
-  rel="$(fetch_sha "$base/TokenMeter.commit")" || { PB_WHY="no valid release commit marker"; return 1; }
+is_semver() { printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; }
+is_sha()    { printf '%s' "$1" | grep -Eq '^[0-9a-f]{40}$'; }
 
-  if [ -n "${TOKENMETER_MAIN_SHA:-}" ]; then
-    main="$(printf '%s' "$TOKENMETER_MAIN_SHA" | tr -d '[:space:]')"
-    printf '%s' "$main" | grep -Eq '^[0-9a-f]{40}$' || main=""
-  else
-    main="$(fetch_sha "https://api.github.com/repos/roy-diptanil/TokenMeter/commits/main" \
-      -H "Accept: application/vnd.github.sha" -H "X-GitHub-Api-Version: 2022-11-28")" || main=""
+# release_base: where the release assets live. TOKENMETER_RELEASE_BASE wins; TOKENMETER_VERSION=vX.Y.Z
+# pins a release; otherwise GitHub's "latest" redirect (newest non-prerelease).
+release_base() {
+  local root="${TOKENMETER_RELEASES_URL:-https://github.com/roy-diptanil/TokenMeter/releases}"
+  if [ -n "${TOKENMETER_RELEASE_BASE:-}" ]; then printf '%s' "$TOKENMETER_RELEASE_BASE"
+  elif [ -n "${TOKENMETER_VERSION:-}" ]; then printf '%s/download/%s' "$root" "$TOKENMETER_VERSION"
+  else printf '%s/latest/download' "$root"
   fi
-  if [ -z "$main" ]; then
-    say "Note: could not look up main's latest commit; using the release as is."
-  elif [ "$main" != "$rel" ]; then
-    PB_BEHIND=1
-    return 2
+}
+
+# prebuilt_fetch WORKDIR: try to obtain a verified prebuilt app.
+#   returns 0 and sets PB_APP / PB_SHA / PB_VER on success; returns 1 and sets PB_WHY otherwise.
+#   Never installs anything.
+TMPD=""
+PB_APP=""; PB_SHA=""; PB_VER=""; PB_WHY=""
+prebuilt_fetch() {
+  local work="$1" base rel ver
+  base="$(release_base)"
+  rel="$(fetch_text "$base/TokenMeter.commit")" || rel=""
+  is_sha "$rel" || { PB_WHY="no valid release commit marker"; return 1; }
+  ver="$(fetch_text "$base/TokenMeter.version")" || ver=""
+  is_semver "$ver" || { PB_WHY="no valid release version marker"; return 1; }
+  if [ -n "${TOKENMETER_VERSION:-}" ] && [ "v$ver" != "$TOKENMETER_VERSION" ]; then
+    PB_WHY="release is $ver, not the requested $TOKENMETER_VERSION"; return 1
   fi
 
   curl -fsSL --max-time 600 -o "$work/TokenMeter.zip" "$base/TokenMeter.zip" </dev/null 2>/dev/null || { PB_WHY="could not download TokenMeter.zip"; return 1; }
@@ -139,17 +144,71 @@ prebuilt_fetch() {
   local app="$work/x/TokenMeter.app"
   [ -d "$app" ] || { PB_WHY="zip does not contain TokenMeter.app"; return 1; }
   [ "$(plist_get "$app" TokenMeterCommit)" = "$rel" ] || { PB_WHY="app commit does not match the release marker"; return 1; }
+  [ "$(plist_get "$app" CFBundleShortVersionString)" = "$ver" ] || { PB_WHY="app version does not match the release version marker"; return 1; }
   [ "$(plist_get "$app" TokenMeterDirty)" = "false" ] || { PB_WHY="app is marked as a dirty build"; return 1; }
   [ "$(plist_get "$app" CFBundleIdentifier)" = "com.local.tokenmeter" ] || { PB_WHY="unexpected bundle identifier"; return 1; }
   codesign --verify --deep "$app" >/dev/null 2>&1 || { PB_WHY="code signature check failed"; return 1; }
   xattr -dr com.apple.quarantine "$app" >/dev/null 2>&1 || true
-  PB_APP="$app"; PB_SHA="$rel"
+  PB_APP="$app"; PB_SHA="$rel"; PB_VER="$ver"
   return 0
 }
 
-# build_failed_for_toolchain LOG: success if LOG shows the missing SwiftUI macro plugin (CLT-only machine).
+# ver_gt A B: success if dotted version A is numerically greater than B.
+ver_gt() {
+  local i a b
+  local -a pa pb
+  IFS=. read -r -a pa <<<"$1"
+  IFS=. read -r -a pb <<<"$2"
+  for i in 0 1 2 3; do
+    a="${pa[$i]:-0}"; b="${pb[$i]:-0}"
+    a="${a//[!0-9]/}"; b="${b//[!0-9]/}"
+    [ "${a:-0}" -gt "${b:-0}" ] && return 0
+    [ "${a:-0}" -lt "${b:-0}" ] && return 1
+  done
+  return 1
+}
+
+# best_xcode DIR...: print the Contents/Developer path of the highest-version Xcode*.app in the given
+# directories (nothing if none).
+best_xcode() {
+  local d app v best="" bestv="-1"
+  for d in "$@"; do
+    for app in "$d"/Xcode*.app; do
+      [ -d "$app/Contents/Developer" ] || continue
+      v="$(plist_get "$app" CFBundleShortVersionString)"; [ -n "$v" ] || v="0"
+      if [ -z "$best" ] || ver_gt "$v" "$bestv"; then best="$app/Contents/Developer"; bestv="$v"; fi
+    done
+  done
+  [ -z "$best" ] || printf '%s' "$best"
+}
+
+# xcode_for_build SELECTED_PATH DIR...: the Xcode to use for the build, only when the Command Line
+# Tools are selected (SELECTED_PATH is `xcode-select -p`) and the user did not set DEVELOPER_DIR.
+xcode_for_build() {
+  local sel="$1"; shift
+  [ -z "${DEVELOPER_DIR:-}" ] || return 0
+  case "$sel" in *CommandLineTools*) best_xcode "$@" ;; esac
+}
+
+# xcode_for_retry LOG TRIED_DEVELOPER_DIR DIR...: after a failed build, an Xcode worth retrying with:
+# only when the log shows the missing SwiftUI macro plugin, the user did not set DEVELOPER_DIR, and the
+# best installed Xcode is not the toolchain that was just tried.
+xcode_for_retry() {
+  local log="$1" tried="$2"; shift 2
+  [ -z "${DEVELOPER_DIR:-}" ] || return 0
+  build_failed_for_toolchain "$log" || return 0
+  local best; best="$(best_xcode "$@")"
+  if [ -n "$best" ] && [ "$best" != "$tried" ]; then printf '%s' "$best"; fi
+}
+
+# build_failed_for_toolchain LOG: success if LOG shows the missing SwiftUI macro plugin (no full Xcode).
 build_failed_for_toolchain() {
   grep -Eq 'SwiftUIMacros|plugin for module|external macro implementation' "$1" 2>/dev/null
+}
+
+# build_failed_for_license LOG: success if LOG shows the Xcode license has not been accepted.
+build_failed_for_license() {
+  grep -Eiq 'Xcode license|xcodebuild -license' "$1" 2>/dev/null
 }
 
 # report_build_failure LOG: explain a failed source build (stderr). Does not exit.
@@ -158,15 +217,49 @@ report_build_failure() {
   if build_failed_for_toolchain "$log"; then
     {
       printf '==> ERROR: Your Command Line Tools cannot build SwiftUI apps with this macOS SDK (the SwiftUI macro plugin ships only with Xcode).\n'
-      printf '    Install Xcode from the App Store, open it once, run: sudo xcode-select -s /Applications/Xcode.app\n'
-      printf '    then re-run this installer. (If a prebuilt release is available the installer uses that automatically.)\n'
+      printf '    Install Xcode from the App Store, open it once to accept the license, then re-run this installer.\n'
+      printf '    You do not need to change xcode-select: the installer finds Xcode itself.\n'
+      printf '    (If a prebuilt release is available the installer uses that automatically.)\n'
+      printf '    If you ask for help, include the output of: xcode-select -p   and   xcodebuild -version\n'
+      printf '    Build log: %s\n' "$log"
+    } >&2
+  elif build_failed_for_license "$log"; then
+    {
+      printf '==> ERROR: The Xcode license has not been accepted.\n'
+      printf '    Open Xcode once, or run: sudo xcodebuild -license accept\n'
+      printf '    then re-run this installer.\n'
       printf '    Build log: %s\n' "$log"
     } >&2
   else
     printf '==> ERROR: The build failed. Last lines of the log:\n' >&2
     tail -n 15 "$log" >&2 || true
+    printf '    If you ask for help, include the output of: xcode-select -p   and   xcodebuild -version\n' >&2
     printf '    Full build log: %s\n' "$log" >&2
   fi
+}
+
+# run_build SRC LOG [DEVELOPER_DIR]: run ./build.sh in SRC, showing and logging its output.
+# DEVELOPER_DIR applies to this one command only.
+run_build() {
+  local src="$1" log="$2" dev="${3:-}"
+  if [ -n "$dev" ]; then
+    { ( cd "$src" && DEVELOPER_DIR="$dev" ./build.sh </dev/null ) 2>&1 | tee "$log"; }
+  else
+    { ( cd "$src" && ./build.sh </dev/null ) 2>&1 | tee "$log"; }
+  fi
+}
+
+# print_toolchain [DEVELOPER_DIR]: show which Swift/Xcode the build will use.
+print_toolchain() {
+  local dev="${1:-}" s x
+  if [ -n "$dev" ]; then
+    s="$(DEVELOPER_DIR="$dev" swift --version 2>&1 </dev/null | head -n 1 || true)"
+    x="$(DEVELOPER_DIR="$dev" xcodebuild -version 2>/dev/null </dev/null | head -n 1 || true)"
+  else
+    s="$(swift --version 2>&1 </dev/null | head -n 1 || true)"
+    x="$(xcodebuild -version 2>/dev/null </dev/null | head -n 1 || true)"
+  fi
+  say "Toolchain: ${s:-swift unknown}${x:+ / $x}"
 }
 
 main() {
@@ -181,6 +274,10 @@ main() {
   local REPO="${TOKENMETER_REPO:-https://github.com/roy-diptanil/TokenMeter.git}"
   local APP="$DEST/TokenMeter.app"
 
+  if [ -n "${TOKENMETER_VERSION:-}" ]; then
+    printf '%s' "$TOKENMETER_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail "TOKENMETER_VERSION must look like v1.0.0 (got '$TOKENMETER_VERSION')."
+  fi
+
   TMPD="$(mktemp -d "${TMPDIR:-/tmp}/tokenmeter-install.XXXXXX")"
   trap 'rc=$?; rm -rf "$TMPD"; if [ "$rc" -ne 0 ]; then printf "==> Install did not finish (exit %s). Fix the issue above and re-run; it is safe to repeat.\n" "$rc" >&2; fi' EXIT
 
@@ -194,21 +291,15 @@ main() {
   [ "$major" -ge 14 ] 2>/dev/null || fail "macOS 14 or newer is required (found $ver)."
   say "macOS $ver ($arch)"
 
-  # (b) prebuilt release first: needs no Swift, git or Xcode
+  # (b) prebuilt stable release first: needs no Swift, git or Xcode
   local BUILT=""
   if [ "${TOKENMETER_FROM_SOURCE:-0}" = "1" ]; then
-    say "TOKENMETER_FROM_SOURCE=1: building from source."
+    say "TOKENMETER_FROM_SOURCE=1: building main from source."
+  elif prebuilt_fetch "$TMPD"; then
+    BUILT="$PB_APP"
+    say "Using TokenMeter $PB_VER (prebuilt release)"
   else
-    local prc=0
-    prebuilt_fetch "$TMPD" || prc=$?
-    if [ "$prc" -eq 0 ]; then
-      BUILT="$PB_APP"
-      say "Using the prebuilt release (${PB_SHA:0:7})"
-    elif [ "$prc" -eq 2 ]; then
-      say "The prebuilt release is behind main; building from source instead."
-    else
-      say "Prebuilt download failed ($PB_WHY); building from source instead."
-    fi
+    say "Prebuilt download failed ($PB_WHY); building from source instead."
   fi
 
   if [ -z "$BUILT" ]; then
@@ -234,13 +325,28 @@ main() {
       git clone --quiet --depth 1 --branch main "$REPO" "$SRC" </dev/null
     fi
 
-    # (d2) build, keeping a log (visible progress is preserved via tee)
+    # (d2) build with the right toolchain, keeping a log (visible progress is preserved via tee)
+    local SEL XDEV="" LOG
+    SEL="$(xcode-select -p 2>/dev/null </dev/null || true)"
+    XDEV="$(xcode_for_build "$SEL" /Applications "$HOME/Applications")"
+    if [ -n "$XDEV" ]; then
+      say "Using Xcode at ${XDEV%/Contents/Developer} for this build (the Command Line Tools are selected; your selection is not changed)."
+    fi
+    print_toolchain "$XDEV"
     say "Building (this takes a minute or two)..."
-    local LOG
     LOG="$(mktemp "${TMPDIR:-/tmp}/tokenmeter-build.XXXXXX")"
-    if ! { ( cd "$SRC" && ./build.sh </dev/null ) 2>&1 | tee "$LOG"; }; then
-      report_build_failure "$LOG"
-      exit 1
+    if ! run_build "$SRC" "$LOG" "$XDEV"; then
+      local RX
+      RX="$(xcode_for_retry "$LOG" "${XDEV:-$SEL}" /Applications "$HOME/Applications")"
+      if [ -n "$RX" ]; then
+        say "The build needs the full Xcode toolchain; retrying once with Xcode at ${RX%/Contents/Developer}."
+        print_toolchain "$RX"
+        LOG="$(mktemp "${TMPDIR:-/tmp}/tokenmeter-build.XXXXXX")"
+        if ! run_build "$SRC" "$LOG" "$RX"; then report_build_failure "$LOG"; exit 1; fi
+      else
+        report_build_failure "$LOG"
+        exit 1
+      fi
     fi
     rm -f "$LOG"
     BUILT="$SRC/build/TokenMeter.app"

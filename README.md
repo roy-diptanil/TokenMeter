@@ -16,24 +16,34 @@ A macOS menu-bar app that shows your Claude and Codex usage caps, with per-model
 
 What the script does (it is short, read it first if you like):
 
-- Uses a prebuilt universal (Apple silicon + Intel) app from the latest GitHub release when one is available and current. No Xcode, Swift or git needed.
-- Otherwise builds TokenMeter from source on your Mac (checkout in `~/.tokenmeter-src`). Requires the Swift toolchain, see Troubleshooting.
+- Installs the newest stable release: a prebuilt universal (Apple silicon + Intel) app. No Xcode, Swift or git needed.
+- Falls back to building `main` from source (checkout in `~/.tokenmeter-src`) if the prebuilt download or any of its checks fails. See Troubleshooting.
 - Installs to `/Applications`.
 - Never touches your sign-ins or data in `~/Library`.
 - Safe to re-run to update.
 - If `/Applications` isn't writable (and `sudo` can't prompt), it installs to `~/Applications` instead and says so.
 
-Releases are built by GitHub Actions from `main` (see `.github/workflows/release.yml`). Before installing a prebuilt app the installer
-verifies its SHA-256 checksum, checks that the commit embedded in the app matches the release's commit marker (and that `main` is not newer,
-otherwise it builds from source), and checks the bundle id and code signature. If any check fails it falls back to building from source.
+Pin or roll back to a specific release, or build the tip of `main` yourself:
 
-Environment variables (all optional): `TOKENMETER_FROM_SOURCE=1` (skip the prebuilt), `TOKENMETER_RELEASE_BASE` (download base URL),
-`TOKENMETER_MAIN_SHA` (testing), `TOKENMETER_DEST` (install dir), `TOKENMETER_SRC` (source checkout dir), `TOKENMETER_REPO` (git URL),
-`TOKENMETER_NO_LAUNCH=1` (testing).
+    curl -fsSL https://raw.githubusercontent.com/roy-diptanil/TokenMeter/main/install.sh | TOKENMETER_VERSION=v1.0.0 bash
+    curl -fsSL https://raw.githubusercontent.com/roy-diptanil/TokenMeter/main/install.sh | TOKENMETER_FROM_SOURCE=1 bash
+
+Releases are built by GitHub Actions (`.github/workflows/release.yml`). Before installing a prebuilt app the installer verifies its
+SHA-256 checksum, checks that the commit and version embedded in the app match the release's markers, and checks the bundle id and
+code signature. If any check fails it falls back to building from source. These checks catch corruption and mismatches; they do not
+protect against a compromised publisher, so the trust you place in the release is the trust you place in this repository.
+
+Environment variables (all optional): `TOKENMETER_VERSION` (e.g. `v1.0.0`), `TOKENMETER_FROM_SOURCE=1` (skip the prebuilt),
+`TOKENMETER_RELEASE_BASE` (download base URL), `TOKENMETER_DEST` (install dir), `TOKENMETER_SRC` (source checkout dir),
+`TOKENMETER_REPO` (git URL), `TOKENMETER_NO_LAUNCH=1` (testing).
 
 Then click the gauge icon in the menu bar and choose "Add account...".
 
-Requires macOS 14+. The prebuilt path needs nothing else; building from source needs the Xcode Command Line Tools (the script starts their install if missing, then asks you to re-run it) and, on recent macOS SDKs, full Xcode.
+### Compatibility
+
+macOS 14 or newer. The prebuilt app is a universal binary built on macOS 15 (Xcode 16-series) and smoke-tested on the macOS versions
+listed in `.github/workflows/ci.yml` (it must report its version and run `--login-item status` on each). Building from source needs
+the Swift toolchain and, on recent macOS SDKs, the full Xcode app.
 
 To uninstall (keeps your data; add `--purge-data` to delete it too):
 
@@ -49,25 +59,36 @@ TokenMeter remembers that you turned it on and re-registers it at launch after a
 
 ### Updating
 
-Click "Check for updates" in the popover footer. TokenMeter compares the commit it was built from (shown as "Version abc1234")
-with `main` on GitHub using `git ls-remote`, at most once a day on its own and silently. TokenMeter checks for updates about once a day in the background. If a newer commit exists, "Update now"
-runs the same install command as above in the background, then restarts the app after the build. Progress goes to
+TokenMeter checks for a newer release about once a day in the background (or when you click "Check for updates" in the popover footer).
+It asks GitHub which release is newest (a single request to `github.com/roy-diptanil/TokenMeter/releases/latest`; no git, no login) and
+compares it with its own version ("Version 1.0.0" in the footer). "Update available — v1.0.1" appears only when a newer release exists,
+never because `main` moved. "Update now" runs the install command above in the background, then restarts the app. Progress goes to
 `~/Library/Logs/TokenMeter-update.log`; if the app is still running after about five minutes, the footer says so and offers "Open log".
-A failed build leaves the old app in place. Builds from a local checkout with changes show as "Dev build" and never prompt.
+A failed install leaves the old app in place. Builds from a local checkout (or with local changes) show as "Dev build" and never prompt.
+
+### Releasing
+
+The version lives in the `VERSION` file (semantic versioning, `MAJOR.MINOR.PATCH`, starting at `1.0.0`). To release: bump `VERSION` in a pull
+request and merge it. The `release` workflow then builds the universal app, tags `v<VERSION>` and publishes the GitHub release with
+`TokenMeter.zip`, `TokenMeter.zip.sha256`, `TokenMeter.commit` and `TokenMeter.version`. Release notes are generated from the merged pull
+request titles. Re-running the workflow for an existing tag does nothing. There is no rolling build of `main`.
 
 ### Troubleshooting
 
-If a source build fails with `external macro implementation type 'SwiftUIMacros.StateMacro' could not be found` or
-`plugin for module 'SwiftUIMacros' not found`: your Command Line Tools cannot build SwiftUI apps with this macOS SDK (the SwiftUI macro
-plugin ships only with Xcode). Install Xcode from the App Store, open it once, run `sudo xcode-select -s /Applications/Xcode.app`, then
-re-run the installer. (If a prebuilt release is available the installer uses that automatically, so this only affects source builds.)
-The installer keeps the build log and prints its path.
+Source builds need the full Xcode app: on recent macOS SDKs SwiftUI's `@State` is a macro whose plugin ships only with Xcode, not with the
+Command Line Tools. A failure looks like `external macro implementation type 'SwiftUIMacros.StateMacro' could not be found` or
+`plugin for module 'SwiftUIMacros' not found`. The installer uses an installed Xcode automatically even when the Command Line Tools are
+selected (it sets `DEVELOPER_DIR` for the build only; it never runs `sudo` or changes `xcode-select`), and retries once with another
+installed Xcode if needed. If there is no Xcode, install it from the App Store, open it once to accept the license, then re-run the
+installer. If the license has not been accepted, open Xcode once or run `sudo xcodebuild -license accept`. The installer keeps the build
+log and prints its path. When asking for help, include the output of `xcode-select -p` and `xcodebuild -version`.
 
 ### Development
 
-    ./build.sh                                          # builds build/TokenMeter.app (ad-hoc signed)
-    UNIVERSAL=1 ./build.sh                              # universal arm64 + x86_64 (needs full Xcode)
-    scripts/package-release.sh                          # zip + sha256 + commit marker in build/ (clean tree only)
+    ./build.sh                                          # builds build/TokenMeter.app (ad-hoc signed); version from VERSION
+    UNIVERSAL=1 ./build.sh                              # universal arm64 + x86_64 (one native build per architecture, then lipo)
+    build/TokenMeter.app/Contents/MacOS/TokenMeter --version   # TokenMeter 1.0.0 (<short commit or dev>)
+    scripts/package-release.sh                          # zip + sha256 + commit + version in build/ (clean tree only)
     scripts/test-install.sh                             # installer tests (temp dirs only)
     swift run SelfTest                                  # parser/logic tests (synthetic fixtures only)
     build/TokenMeter.app/Contents/MacOS/TokenMeter --dump   # one-shot fetch, prints numbers only

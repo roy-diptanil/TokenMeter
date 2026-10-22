@@ -292,7 +292,7 @@ struct PopoverView: View {
                         .toggleStyle(.checkbox).font(.caption).disabled(!login.canToggle)
                     if login.needsApproval { Text("Needs approval").font(.caption).foregroundStyle(.orange) }
                     Spacer()
-                    Text("Version \(updater.installed.short)").font(.caption2).foregroundStyle(.tertiary)
+                    Text(VersionInfo.footer(updater.installed)).font(.caption2).foregroundStyle(.tertiary)
                 }
                 if !login.canToggle { Text("Only available for the installed copy in /Applications").font(.caption2).foregroundStyle(.secondary) }
                 if login.needsApproval { Button("Open Login Items settings") { login.openSettings() }.controlSize(.small) }
@@ -316,9 +316,9 @@ struct PopoverView: View {
                 Spacer()
                 Button("Open log") { NSWorkspace.shared.open(UpdateInstaller.logURL) }.controlSize(.small)
             }
-        case .result(.updateAvailable):
+        case .result(.updateAvailable(let availableVersion)):
             HStack {
-                Text("Update available").font(.caption.bold())
+                Text("Update available — v\(availableVersion)").font(.caption.bold())
                 Spacer()
                 Button("Update now") { updater.startUpdate() }.controlSize(.small)
             }
@@ -328,8 +328,8 @@ struct PopoverView: View {
                 if updater.state == .checking { ProgressView().controlSize(.small) }
                 if case .result(let r) = updater.state {
                     switch r {
-                    case .upToDate: Text("Up to date (\(inst.short))").font(.caption).foregroundStyle(.secondary)
-                    case .devBuild: Text("Dev build (\(inst.short)\(inst.dirty ? "+local changes" : ""))").font(.caption).foregroundStyle(.secondary)
+                    case .upToDate: Text("Up to date (v\(inst.version ?? "unknown"))").font(.caption).foregroundStyle(.secondary)
+                    case .devBuild(let latest): Text("Dev build (\(inst.short)\(inst.dirty ? "+local changes" : "")) · latest release v\(latest)").font(.caption).foregroundStyle(.secondary)
                     case .checkFailed(let m): Text("Couldn't check: \(m)").font(.caption).foregroundStyle(.orange).lineLimit(2)
                     case .updateAvailable: EmptyView()
                     }

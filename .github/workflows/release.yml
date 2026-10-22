@@ -1,62 +1,65 @@
-# Builds the universal app on GitHub's macOS runners.
-#   pull_request:  build + upload as a workflow artifact only (never publishes)
-#   push to main:  also publishes/updates the rolling "latest" release that install.sh downloads
-# Uses the pinned macos-15 label rather than macos-latest so the Xcode/SDK does not change underneath us.
+# Publishes a versioned release when a change to VERSION lands on main.
+#   1. Bump VERSION (MAJOR.MINOR.PATCH) in a pull request and merge it.
+#   2. This workflow builds the universal app, tags v<VERSION> at the merged commit, and creates the GitHub release
+#      with TokenMeter.zip, .sha256, .commit and .version (notes are generated from merged PR titles).
+# Idempotent: if the tag already exists it does nothing, so a manual re-run is safe.
+# There is no rolling "latest build of main" release: anyone who wants main builds from source.
 # Only first-party actions plus the preinstalled gh CLI with the built-in github.token.
-name: build-release
+name: release
 
 on:
-  pull_request:
   push:
     branches: [main]
+    paths: [VERSION]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: build-release-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  build:
+  release:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Toolchain versions
+      - name: Read VERSION
+        id: v
         run: |
-          swift --version
-          xcodebuild -version
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::VERSION must be MAJOR.MINOR.PATCH (found '$VERSION')"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether the tag already exists
+        id: tag
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v${{ steps.v.outputs.version }}" >/dev/null 2>&1; then
+            echo "::notice::Tag v${{ steps.v.outputs.version }} already exists; nothing to release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Self tests
+        if: steps.tag.outputs.exists == 'false'
         run: swift run SelfTest
 
-      - name: Package release
-        run: scripts/package-release.sh
+      - name: Package release files
+        if: steps.tag.outputs.exists == 'false'
+        run: bash scripts/package-release.sh
 
-      - name: Upload build files (pull requests only)
-        if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: TokenMeter-release-files
-          path: |
-            build/TokenMeter.zip
-            build/TokenMeter.zip.sha256
-            build/TokenMeter.commit
-
-      - name: Publish latest release (main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Create release
+        if: steps.tag.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
         run: |
-          set -euo pipefail
-          NOTES="Build of main at ${GITHUB_SHA}"
-          if gh release view latest >/dev/null 2>&1; then
-            # .commit goes LAST so readers never see a new commit marker with old assets.
-            gh release upload latest build/TokenMeter.zip build/TokenMeter.zip.sha256 build/TokenMeter.commit --clobber
-            gh release edit latest --notes "$NOTES" --latest --prerelease=false
-          else
-            gh release create latest build/TokenMeter.zip build/TokenMeter.zip.sha256 build/TokenMeter.commit \
-              --title "TokenMeter (latest build of main)" --notes "$NOTES" --target "$GITHUB_SHA" --latest
-          fi
+          gh release create "v$VERSION" \
+            build/TokenMeter.zip build/TokenMeter.zip.sha256 build/TokenMeter.commit build/TokenMeter.version \
+            --target "$GITHUB_SHA" --title "TokenMeter $VERSION" --generate-notes --latest

@@ -1,33 +1,69 @@
 import Foundation
 
-/// The commit the running app was built from (embedded by build.sh into Info.plist).
+/// Strict semantic version "MAJOR.MINOR.PATCH" (optional leading "v"); anything else is rejected.
+public struct SemVer: Comparable, Equatable, CustomStringConvertible {
+    public let major: Int, minor: Int, patch: Int
+    public init(_ major: Int, _ minor: Int, _ patch: Int) { self.major = major; self.minor = minor; self.patch = patch }
+    public init?(_ text: String) {
+        var t = Substring(text)
+        if t.hasPrefix("v") { t = t.dropFirst() }
+        let parts = t.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        var n: [Int] = []
+        for p in parts {
+            guard !p.isEmpty, p.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }), let v = Int(p) else { return nil }
+            n.append(v)
+        }
+        self.init(n[0], n[1], n[2])
+    }
+    public var description: String { "\(major).\(minor).\(patch)" }
+    public static func < (a: SemVer, b: SemVer) -> Bool {
+        (a.major, a.minor, a.patch) < (b.major, b.minor, b.patch)
+    }
+}
+
+/// The release version and commit the running app was built from (embedded by build.sh into Info.plist).
 public struct InstalledBuild: Equatable {
     public var commit: String?     // full SHA; nil when the build was not from a git checkout
     public var dirty: Bool
-    public init(commit: String?, dirty: Bool) { self.commit = commit; self.dirty = dirty }
+    public var version: String?    // CFBundleShortVersionString (from the VERSION file); nil when unreadable
+    public init(commit: String?, dirty: Bool, version: String? = nil) { self.commit = commit; self.dirty = dirty; self.version = version }
 
     public var short: String { commit.map { String($0.prefix(7)) } ?? "unknown" }
     public var isDev: Bool { commit == nil || dirty }
+    public var semver: SemVer? { version.flatMap { SemVer($0) } }
 
     public static func from(info: [String: Any]?) -> InstalledBuild {
         let c = (info?["TokenMeterCommit"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let valid = c.flatMap { $0.count >= 7 && $0.allSatisfy(\.isHexDigit) ? $0 : nil }
-        return InstalledBuild(commit: valid, dirty: (info?["TokenMeterDirty"] as? String) == "true")
+        let v = (info?["CFBundleShortVersionString"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return InstalledBuild(commit: valid, dirty: (info?["TokenMeterDirty"] as? String) == "true", version: v)
     }
     public static var current: InstalledBuild { from(info: Bundle.main.infoDictionary) }
 }
 
+public enum VersionInfo {
+    /// `TokenMeter <version> (<short commit or 'dev'>)`; dev = unknown commit or local changes.
+    public static func line(_ i: InstalledBuild) -> String {
+        "TokenMeter \(i.version ?? "unknown") (\(i.isDev ? "dev" : i.short))"
+    }
+    /// Footer text: the version, plus the short commit only for dev/dirty builds.
+    public static func footer(_ i: InstalledBuild) -> String {
+        "Version \(i.version ?? "unknown")" + (i.isDev ? " (\(i.short)\(i.dirty ? "+local changes" : ""))" : "")
+    }
+}
+
 public enum UpdateResult: Equatable {
     case upToDate
-    case updateAvailable(String)               // remote SHA
-    case devBuild(remoteDiffers: Bool)         // installed commit unknown or dirty: informational, never nags
+    case updateAvailable(String)               // newer release version, e.g. "1.0.1"
+    case devBuild(latest: String)              // installed build is a dev build: informational, never nags
     case checkFailed(String)
 }
 
 public protocol UpdateCheckStorage: AnyObject {
     var lastCheck: Date? { get set }
-    var lastRemoteSHA: String? { get set }
-    var cacheInstalledCommit: String? { get set }   // which installed build lastRemoteSHA/lastCheck were computed for
+    var lastRemoteVersion: String? { get set }
+    var cacheInstalledKey: String? { get set }   // which installed build lastRemoteVersion/lastCheck were computed for
 }
 
 /// UserDefaults-backed storage (suiteless, keys prefixed "tokenmeter.").
@@ -37,26 +73,26 @@ public final class DefaultsUpdateStorage: UpdateCheckStorage {
         get { UserDefaults.standard.object(forKey: "tokenmeter.update.lastCheck") as? Date }
         set { UserDefaults.standard.set(newValue, forKey: "tokenmeter.update.lastCheck") }
     }
-    public var lastRemoteSHA: String? {
-        get { UserDefaults.standard.string(forKey: "tokenmeter.update.lastRemoteSHA") }
-        set { UserDefaults.standard.set(newValue, forKey: "tokenmeter.update.lastRemoteSHA") }
+    public var lastRemoteVersion: String? {
+        get { UserDefaults.standard.string(forKey: "tokenmeter.update.lastRemoteVersion") }
+        set { UserDefaults.standard.set(newValue, forKey: "tokenmeter.update.lastRemoteVersion") }
     }
-    public var cacheInstalledCommit: String? {
-        get { UserDefaults.standard.string(forKey: "tokenmeter.update.cacheInstalledCommit") }
-        set { UserDefaults.standard.set(newValue, forKey: "tokenmeter.update.cacheInstalledCommit") }
+    public var cacheInstalledKey: String? {
+        get { UserDefaults.standard.string(forKey: "tokenmeter.update.cacheInstalledKey") }
+        set { UserDefaults.standard.set(newValue, forKey: "tokenmeter.update.cacheInstalledKey") }
     }
 }
 
 public struct UpdateChecker {
     public static let interval: TimeInterval = 24 * 3600
-    public var remoteSHA: () async throws -> String
+    public var remoteVersion: () async throws -> String
     public var clock: () -> Date
     public var storage: UpdateCheckStorage
 
-    public init(remoteSHA: @escaping () async throws -> String = { try await GitRemote.mainSHA() },
+    public init(remoteVersion: @escaping () async throws -> String = { try await ReleaseRemote.latestVersion() },
                 clock: @escaping () -> Date = Date.init,
                 storage: UpdateCheckStorage = DefaultsUpdateStorage()) {
-        self.remoteSHA = remoteSHA; self.clock = clock; self.storage = storage
+        self.remoteVersion = remoteVersion; self.clock = clock; self.storage = storage
     }
 
     /// Pure: whether an automatic check is due.
@@ -65,21 +101,23 @@ public struct UpdateChecker {
         return now.timeIntervalSince(l) >= interval || now < l   // clock moved back: check
     }
 
-    /// Pure: SHA equality is the right test (the remote history is a single force-pushed commit).
+    /// Pure: only a strictly newer RELEASE counts as an update; main moving never does.
     public static func evaluate(installed: InstalledBuild, remote: String) -> UpdateResult {
-        let r = remote.lowercased()
-        let differs = installed.commit != r
-        if installed.isDev { return .devBuild(remoteDiffers: differs) }
-        return differs ? .updateAvailable(r) : .upToDate
+        guard let r = SemVer(remote) else { return .checkFailed("unexpected response") }
+        if installed.isDev { return .devBuild(latest: r.description) }
+        guard let i = installed.semver else { return .devBuild(latest: r.description) }   // unreadable own version: never nag
+        return r > i ? .updateAvailable(r.description) : .upToDate
     }
 
-    /// Always checks; records the time and remote SHA on success.
+    /// Always checks; records the time and remote version on success.
     public func check(installed: InstalledBuild) async -> UpdateResult {
         do {
-            let sha = try await remoteSHA()
-            storage.lastCheck = clock(); storage.lastRemoteSHA = sha.lowercased()
-            storage.cacheInstalledCommit = Self.cacheKey(installed)
-            return Self.evaluate(installed: installed, remote: sha)
+            let v = try await remoteVersion()
+            let r = Self.evaluate(installed: installed, remote: v)
+            if case .checkFailed = r { return r }
+            storage.lastCheck = clock(); storage.lastRemoteVersion = SemVer(v)?.description
+            storage.cacheInstalledKey = Self.cacheKey(installed)
+            return r
         } catch {
             return .checkFailed((error as? LocalizedError)?.errorDescription ?? "unknown error")
         }
@@ -93,65 +131,67 @@ public struct UpdateChecker {
         return r
     }
 
-    static func cacheKey(_ i: InstalledBuild) -> String { (i.commit ?? "unknown") + (i.dirty ? "+dirty" : "") }
+    static func cacheKey(_ i: InstalledBuild) -> String { (i.version ?? "unknown") + "|" + (i.commit ?? "unknown") + (i.dirty ? "+dirty" : "") }
 
     /// What to show at launch, and whether a live check must run right away (ignoring the 24h throttle).
     /// A cache computed for a different installed build (app just updated/reinstalled) is discarded.
     /// "Update available" is never shown from the cache alone: it is re-verified live first.
     public func launchState(installed: InstalledBuild) -> (shown: UpdateResult?, verifyNow: Bool) {
         let key = Self.cacheKey(installed)
-        if storage.cacheInstalledCommit != key {
-            storage.lastRemoteSHA = nil; storage.lastCheck = nil; storage.cacheInstalledCommit = key
+        if storage.cacheInstalledKey != key {
+            storage.lastRemoteVersion = nil; storage.lastCheck = nil; storage.cacheInstalledKey = key
             return (nil, true)
         }
-        guard let sha = storage.lastRemoteSHA else { return (nil, false) }
-        let r = Self.evaluate(installed: installed, remote: sha)
+        guard let v = storage.lastRemoteVersion else { return (nil, false) }
+        let r = Self.evaluate(installed: installed, remote: v)
+        if case .checkFailed = r { storage.lastRemoteVersion = nil; return (nil, true) }
         if case .updateAvailable = r { return (nil, true) }
         return (r, false)
     }
 }
 
 public enum UpdateError: Error, LocalizedError, Equatable {
-    case git(String)
-    public var errorDescription: String? { if case .git(let m) = self { return m }; return nil }
+    case remote(String)
+    public var errorDescription: String? { if case .remote(let m) = self { return m }; return nil }
 }
 
-public enum GitRemote {
-    public static let repoURL = "https://github.com/roy-diptanil/TokenMeter.git"
+/// Asks GitHub which release is newest: a HEAD request to /releases/latest, which redirects to /releases/tag/v<semver>.
+/// The redirect is read, not followed. No auth, no git, no API token.
+public enum ReleaseRemote {
+    public static let latestURL = "https://github.com/roy-diptanil/TokenMeter/releases/latest"
     public static let timeout: TimeInterval = 15
 
-    /// "<sha>\trefs/heads/main" -> sha
-    public static func parseLsRemote(_ out: String) -> String? {
-        guard let first = out.split(whereSeparator: \.isNewline).first,
-              let sha = first.split(whereSeparator: { $0 == "\t" || $0 == " " }).first,
-              sha.count == 40, sha.allSatisfy(\.isHexDigit) else { return nil }
-        return sha.lowercased()
+    /// Pure: ".../releases/tag/v1.2.3" (absolute or relative, query/fragment ignored) -> "1.2.3"; anything else -> nil.
+    public static func parseLocation(_ location: String?) -> String? {
+        guard let loc = location, let path = URLComponents(string: loc)?.path else { return nil }
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard parts.count >= 3, parts[parts.count - 2] == "tag", parts[parts.count - 3] == "releases",
+              let v = SemVer(parts[parts.count - 1]) else { return nil }
+        return v.description
     }
 
-    /// Public repo, no auth: prompts and credential helpers are disabled, 15s hard timeout.
-    public static func mainSHA() async throws -> String {
-        try await withCheckedThrowingContinuation { cont in
-            DispatchQueue.global(qos: .utility).async {
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                p.arguments = ["-c", "credential.helper=", "ls-remote", repoURL, "refs/heads/main"]
-                p.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": NSHomeDirectory(),
-                                 "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/usr/bin/true",
-                                 "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"]
-                let out = Pipe()
-                p.standardOutput = out; p.standardError = FileHandle.nullDevice; p.standardInput = FileHandle.nullDevice
-                do { try p.run() } catch { cont.resume(throwing: UpdateError.git("git not available")); return }
-                var timedOut = false
-                let kill = DispatchWorkItem { timedOut = true; if p.isRunning { p.terminate() } }
-                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: kill)
-                let data = out.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit(); kill.cancel()
-                if timedOut { cont.resume(throwing: UpdateError.git("timed out")); return }
-                guard p.terminationStatus == 0 else { cont.resume(throwing: UpdateError.git("git exited with \(p.terminationStatus)")); return }
-                if let sha = parseLsRemote(String(decoding: data, as: UTF8.self)) { cont.resume(returning: sha) }
-                else { cont.resume(throwing: UpdateError.git("unexpected response")) }
-            }
-        }
+    private final class NoRedirect: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+    }
+
+    public static func latestVersion() async throws -> String {
+        guard let url = URL(string: latestURL) else { throw UpdateError.remote("bad URL") }
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
+        req.httpMethod = "HEAD"
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = timeout; cfg.timeoutIntervalForResource = timeout
+        cfg.httpCookieStorage = nil; cfg.urlCredentialStorage = nil; cfg.httpShouldSetCookies = false
+        let session = URLSession(configuration: cfg, delegate: NoRedirect(), delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let resp: URLResponse
+        do { resp = try await session.data(for: req).1 }
+        catch let e as URLError where e.code == .timedOut { throw UpdateError.remote("timed out") }
+        catch { throw UpdateError.remote("network error") }
+        guard let http = resp as? HTTPURLResponse else { throw UpdateError.remote("unexpected response") }
+        guard (300..<400).contains(http.statusCode) else { throw UpdateError.remote("no release found (HTTP \(http.statusCode))") }
+        guard let v = parseLocation(http.value(forHTTPHeaderField: "Location")) else { throw UpdateError.remote("unexpected response") }
+        return v
     }
 }
 
