@@ -30,11 +30,16 @@
 #        BEFORE touching any installed app.
 #   Then, for both paths:
 #     - Picks where to install, and checks it is usable, BEFORE touching the running
-#       app. In order: (1) $TOKENMETER_DEST (default /Applications) if writable;
-#       (2) an existing, user-owned $TOKENMETER_DEST/TokenMeter.app is updated in
-#       place with rsync (works even when the folder itself is not writable);
-#       (3) sudo, only if it can really work (passwordless, or a terminal to prompt on);
-#       (4) otherwise ~/Applications, and it tells you so.
+#       app. Without TOKENMETER_DEST (no admin rights, no sudo, ever):
+#       (1) if /Applications/TokenMeter.app already exists and ~/Applications/TokenMeter.app
+#           does not, that copy is updated where it is (copied if the folder is writable,
+#           otherwise updated in place with rsync when the bundle is user-owned; if neither
+#           works it stops and tells you to run uninstall.sh and re-run);
+#       (2) otherwise it installs to ~/Applications (created if needed). If copies exist in
+#           both places it updates the ~/Applications one and warns about the other.
+#       With TOKENMETER_DEST set (e.g. /Applications for a system-wide install) it uses that
+#       folder if writable, else updates an existing user-owned bundle there in place, else
+#       uses sudo, only if it can really work (passwordless, or a terminal to prompt on).
 #     - Quits a running TokenMeter and installs the new copy. If the install step
 #       fails, the previous app is relaunched. Then it removes the quarantine flag
 #       and opens the installed app.
@@ -50,7 +55,8 @@
 #   TOKENMETER_RELEASES_URL    releases root used with TOKENMETER_VERSION (testing; default
 #                              https://github.com/roy-diptanil/TokenMeter/releases)
 #   TOKENMETER_SRC   source checkout dir   (default: $HOME/.tokenmeter-src)
-#   TOKENMETER_DEST  install parent dir    (default: /Applications)
+#   TOKENMETER_DEST  install parent dir    (default: ~/Applications; see above)
+#   TOKENMETER_SYSTEM_APPS  where an existing system-wide copy is looked for (testing; default /Applications)
 #   TOKENMETER_REPO  git URL               (default: https://github.com/roy-diptanil/TokenMeter.git)
 #   TOKENMETER_NO_LAUNCH=1  skip quitting and opening the app (for testing only)
 
@@ -60,7 +66,7 @@ usage() {
   cat <<'EOF'
 Usage: install.sh [-h|--help]
 
-Installs the newest TokenMeter release to /Applications: a verified prebuilt
+Installs the newest TokenMeter release to ~/Applications (no admin rights needed): a verified prebuilt
 app if available, otherwise built from source (main).
 
 Environment:
@@ -68,7 +74,8 @@ Environment:
   TOKENMETER_FROM_SOURCE=1  skip the prebuilt release, build main from source
   TOKENMETER_RELEASE_BASE   prebuilt download base URL (default: newest GitHub release)
   TOKENMETER_SRC   source checkout dir (default: ~/.tokenmeter-src)
-  TOKENMETER_DEST  install parent dir  (default: /Applications)
+  TOKENMETER_DEST  install parent dir  (default: ~/Applications; an existing
+                   /Applications copy is updated in place; use /Applications for system-wide)
   TOKENMETER_REPO  git URL (default: https://github.com/roy-diptanil/TokenMeter.git)
   TOKENMETER_NO_LAUNCH=1  skip quitting/opening the app (testing only)
 EOF
@@ -270,9 +277,7 @@ main() {
   esac
 
   local SRC="${TOKENMETER_SRC:-$HOME/.tokenmeter-src}"
-  local DEST="${TOKENMETER_DEST:-/Applications}"
   local REPO="${TOKENMETER_REPO:-https://github.com/roy-diptanil/TokenMeter.git}"
-  local APP="$DEST/TokenMeter.app"
 
   if [ -n "${TOKENMETER_VERSION:-}" ]; then
     printf '%s' "$TOKENMETER_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail "TOKENMETER_VERSION must look like v1.0.0 (got '$TOKENMETER_VERSION')."
@@ -355,31 +360,48 @@ main() {
 
   # (e) decide where to install and verify it BEFORE quitting anything
   local MODE="" SUDO="" NOLAUNCH="${TOKENMETER_NO_LAUNCH:-0}"
+  local SYSAPPS="${TOKENMETER_SYSTEM_APPS:-/Applications}" UAPPS="$HOME/Applications"
+  local DEST APP EXPLICIT=0 EXISTING_SYS=0
+  if [ -n "${TOKENMETER_DEST:-}" ]; then
+    EXPLICIT=1; DEST="$TOKENMETER_DEST"
+  elif [ -d "$SYSAPPS/TokenMeter.app" ] && [ ! -d "$UAPPS/TokenMeter.app" ]; then
+    EXISTING_SYS=1; DEST="$SYSAPPS"
+    say "Updating the existing copy in /Applications. New installs go to ~/Applications; to move it, run uninstall.sh and install again."
+  else
+    DEST="$UAPPS"
+    if [ -d "$SYSAPPS/TokenMeter.app" ]; then
+      say "Warning: a second copy exists at $SYSAPPS/TokenMeter.app. Updating $UAPPS/TokenMeter.app only. To remove the other one: run uninstall.sh (it removes both) and install again, or delete it yourself."
+    fi
+  fi
+  APP="$DEST/TokenMeter.app"
   local parent
   parent="$(dirname "$DEST")"
   if { [ -d "$DEST" ] && [ -w "$DEST" ]; } || { [ ! -e "$DEST" ] && [ -w "$parent" ]; }; then
     MODE="copy"
   elif [ -d "$APP" ] && [ -w "$APP" ] && [ -w "$APP/Contents" ] && command -v rsync >/dev/null 2>&1; then
     MODE="inplace"
-  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    MODE="sudo"
-  elif command -v sudo >/dev/null 2>&1 && { [ -t 0 ] || { [ -r /dev/tty ] && { : </dev/tty; } 2>/dev/null; }; }; then
-    say "$DEST is not writable; asking for your password (sudo) for the install step only."
-    if sudo -v; then MODE="sudo"; fi
+  elif [ "$EXPLICIT" = "1" ]; then
+    # sudo only for an explicit TOKENMETER_DEST that is not writable
+    if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+      MODE="sudo"
+    elif command -v sudo >/dev/null 2>&1 && { [ -t 0 ] || { [ -r /dev/tty ] && { : </dev/tty; } 2>/dev/null; }; }; then
+      say "$DEST is not writable; asking for your password (sudo) for the install step only."
+      if sudo -v; then MODE="sudo"; fi
+    fi
   fi
   if [ "$MODE" = "sudo" ]; then SUDO="sudo"; fi
   if [ -z "$MODE" ]; then
-    local HOME_DEST="$HOME/Applications"
-    say "$DEST is not writable and sudo is not usable here; installing to $HOME_DEST instead."
-    mkdir -p "$HOME_DEST" 2>/dev/null && [ -w "$HOME_DEST" ] || fail "Cannot write to $DEST or $HOME_DEST. Nothing was changed."
-    DEST="$HOME_DEST"; APP="$DEST/TokenMeter.app"; MODE="copy"
+    if [ "$EXISTING_SYS" = "1" ]; then
+      fail "Cannot update $APP (not writable and not owned by you). Run uninstall.sh, then re-run this installer to install to ~/Applications. Nothing was changed."
+    fi
+    fail "Cannot write to $DEST. Nothing was changed."
   fi
+  if [ "$MODE" = "copy" ]; then mkdir -p "$DEST" 2>/dev/null || fail "Cannot create $DEST. Nothing was changed."; fi
   say "Install mode: $MODE ($APP)"
 
   # (f) quit running app (only now that the destination is known to work)
   local WAS_RUNNING=0 PREV=""
-  if [ -d "/Applications/TokenMeter.app" ]; then PREV="/Applications/TokenMeter.app"; fi
-  if [ -d "$HOME/Applications/TokenMeter.app" ] && [ -z "$PREV" ]; then PREV="$HOME/Applications/TokenMeter.app"; fi
+  if [ -d "$APP" ]; then PREV="$APP"; fi
   if [ "$NOLAUNCH" != "1" ] && pgrep -x TokenMeter >/dev/null 2>&1; then
     WAS_RUNNING=1
     say "Quitting running TokenMeter"

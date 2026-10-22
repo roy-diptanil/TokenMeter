@@ -294,7 +294,7 @@ struct PopoverView: View {
                     Spacer()
                     Text(VersionInfo.footer(updater.installed)).font(.caption2).foregroundStyle(.tertiary)
                 }
-                if !login.canToggle { Text("Only available for the installed copy in /Applications").font(.caption2).foregroundStyle(.secondary) }
+                if !login.canToggle { Text("Only available for the installed copy (in ~/Applications or /Applications)").font(.caption2).foregroundStyle(.secondary) }
                 if login.needsApproval { Button("Open Login Items settings") { login.openSettings() }.controlSize(.small) }
                 if let m = login.message { Text(m).font(.caption2).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             }

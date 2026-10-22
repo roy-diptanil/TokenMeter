@@ -190,5 +190,74 @@ check "(10) e2e: build progress still visible" has "building..."
 check "(10) e2e: log path printed" has "Build log: "
 check "(10) e2e: installed app untouched" test "$(cat "$sb/dest/TokenMeter.app/sentinel")" = "old"
 
+# (11) default destination is ~/Applications (fake HOME), system copies, explicit overrides, ordering.
+# Stubs stand in for sudo/pgrep/osascript/open/pkill so nothing real is quit, opened or elevated.
+STUB="$T/stubs"; mkdir -p "$STUB"
+printf '#!/bin/sh\nexit 1\n' > "$STUB/sudo"
+printf '#!/bin/sh\necho "pgrep" >> "$STUBLOG"\nif [ -e "$STUBLOG.q" ]; then exit 1; fi\nexit 0\n' > "$STUB/pgrep"
+printf '#!/bin/sh\necho "osascript" >> "$STUBLOG"\ntouch "$STUBLOG.q"\nexit 0\n' > "$STUB/osascript"
+printf '#!/bin/sh\necho "open $*" >> "$STUBLOG"\nexit 0\n' > "$STUB/open"
+printf '#!/bin/sh\necho "pkill" >> "$STUBLOG"\nexit 0\n' > "$STUB/pkill"
+chmod +x "$STUB"/*
+make_release "$REL" "$SHA_A" "$SHA_A" "1.0.0" "1.0.0"
+
+# run_default SANDBOX ENV...: install.sh with no TOKENMETER_DEST in sandbox dir SANDBOX (pre-populate it first).
+# Sets OUT, RC, UAPPS (fake ~/Applications), SYS (fake /Applications), LOG (stub call log).
+run_default() {
+  local sb="$1"; shift
+  mkdir -p "$sb/home" "$sb/sys"
+  UAPPS="$sb/home/Applications"; SYS="$sb/sys"; LOG="$sb/stub.log"; : > "$LOG"
+  RC=0
+  OUT="$(env -i PATH="$STUB:$PATH" HOME="$sb/home" TMPDIR="$sb" STUBLOG="$LOG" \
+      TOKENMETER_SYSTEM_APPS="$SYS" TOKENMETER_SRC="$sb/src" TOKENMETER_REPO="$sb/no-such-repo" \
+      TOKENMETER_RELEASE_BASE="file://$REL" "$@" bash "$INSTALL" </dev/null 2>&1)" || RC=$?
+}
+
+# fresh machine: installs to ~/Applications, quits the running app, then opens the new one
+sb="$T/d-fresh"; rm -rf "$sb"; mkdir -p "$sb"
+run_default "$sb"
+check "(11) default: installs to ~/Applications" test "$RC" -eq 0 -a -x "$UAPPS/TokenMeter.app/Contents/MacOS/TokenMeter"
+check "(11) default: nothing in the system folder" test -z "$(ls -A "$SYS")"
+check "(11) default: no sudo mentioned" hasnt "sudo"
+check "(11) default: running app quit, then new app opened" sh -c "grep -q osascript '$LOG' && grep -q '^open ' '$LOG'"
+
+# existing system copy only -> updated where it is
+sb="$T/d-sysonly"; rm -rf "$sb"; mkdir -p "$sb/sys/TokenMeter.app/Contents"; printf old > "$sb/sys/TokenMeter.app/sentinel"
+run_default "$sb" TOKENMETER_NO_LAUNCH=1
+check "(11) system copy: updated where it is" test "$RC" -eq 0 -a -x "$SYS/TokenMeter.app/Contents/MacOS/TokenMeter"
+check "(11) system copy: no new copy in ~/Applications" test ! -e "$UAPPS/TokenMeter.app"
+check "(11) system copy: explanatory message" has "Updating the existing copy in /Applications. New installs go to ~/Applications; to move it, run uninstall.sh and install again."
+
+# copies in both places -> ~/Applications updated, warning printed, system copy untouched
+sb="$T/d-both"; rm -rf "$sb"; mkdir -p "$sb/home/Applications/TokenMeter.app" "$sb/sys/TokenMeter.app"; printf old > "$sb/sys/TokenMeter.app/sentinel"
+run_default "$sb" TOKENMETER_NO_LAUNCH=1
+check "(11) both copies: ~/Applications updated" test "$RC" -eq 0 -a -x "$UAPPS/TokenMeter.app/Contents/MacOS/TokenMeter"
+check "(11) both copies: warns about the second copy" has "a second copy exists at $SYS/TokenMeter.app"
+check "(11) both copies: system copy untouched" test "$(cat "$SYS/TokenMeter.app/sentinel")" = "old"
+
+# explicit TOKENMETER_DEST overrides everything
+sb="$T/d-explicit"; rm -rf "$sb"; mkdir -p "$sb"
+run_default "$sb" TOKENMETER_NO_LAUNCH=1 TOKENMETER_DEST="$sb/custom"
+check "(11) explicit dest: installs there" test "$RC" -eq 0 -a -x "$sb/custom/TokenMeter.app/Contents/MacOS/TokenMeter"
+check "(11) explicit dest: not in ~/Applications" test ! -e "$UAPPS/TokenMeter.app"
+
+# explicit non-writable dest, no tty, sudo unusable -> fails; destination verified BEFORE quitting anything
+sb="$T/d-nowrite"; rm -rf "$sb"; mkdir -p "$sb/locked"; chmod 555 "$sb/locked"
+run_default "$sb" TOKENMETER_DEST="$sb/locked"
+chmod 755 "$sb/locked"
+check "(11) unwritable explicit dest: fails" test "$RC" -ne 0
+check "(11) unwritable explicit dest: clear message" has "Cannot write to $sb/locked. Nothing was changed."
+check "(11) unwritable explicit dest: nothing installed" test -z "$(ls -A "$sb/locked")"
+check "(11) unwritable explicit dest: app never quit (checked before quitting)" test ! -s "$LOG"
+check "(11) unwritable explicit dest: no fallback to ~/Applications" test ! -e "$UAPPS"
+
+# existing system copy that cannot be updated -> clear message, never sudo, nothing quit or changed
+sb="$T/d-sysro"; rm -rf "$sb"; mkdir -p "$sb/sys/TokenMeter.app/Contents"
+chmod 555 "$sb/sys/TokenMeter.app/Contents" "$sb/sys/TokenMeter.app" "$sb/sys"
+run_default "$sb"
+chmod 755 "$sb/sys" "$sb/sys/TokenMeter.app" "$sb/sys/TokenMeter.app/Contents"
+check "(11) unwritable system copy: tells the user to run uninstall.sh" has "Run uninstall.sh, then re-run this installer"
+check "(11) unwritable system copy: fails without quitting or changing anything" test "$RC" -ne 0 -a ! -s "$LOG" -a ! -e "$UAPPS"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAILS"
 [ "$FAILS" -eq 0 ]
