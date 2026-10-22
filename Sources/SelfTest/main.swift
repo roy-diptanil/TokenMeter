@@ -214,25 +214,37 @@ check(ClaudeParser.parseUsage(spendJSON(78, extra: 79.6), now: now)?.bars.map(\.
 let wx = ClaudeParser.parseUsage(Data(#"{"five_hour":{"utilization":37},"seven_day":{"utilization":12},"spend":null,"extra_usage":{"utilization":37.2}}"#.utf8), now: now)
 check(wx?.windowLabel == "5-hour" && wx?.bars.map(\.name) == ["Weekly", "Extra usage"], "window headline keeps extra usage bar even when equal")
 
-// --- Feature B: update checker (invented SHAs, injected deps, no network)
+// --- Feature B: update checker by release version (invented versions, injected deps, no network)
 let shaA = String(repeating: "a1", count: 20), shaB = String(repeating: "b2", count: 20)
-final class MemStore: UpdateCheckStorage { var lastCheck: Date?; var lastRemoteSHA: String?; var cacheInstalledCommit: String? }
+final class MemStore: UpdateCheckStorage { var lastCheck: Date?; var lastRemoteVersion: String?; var cacheInstalledKey: String? }
 struct Boom: Error, LocalizedError { var errorDescription: String? { "offline" } }
 func checker(_ remote: @escaping () async throws -> String, _ st: MemStore = MemStore()) -> UpdateChecker {
-    UpdateChecker(remoteSHA: remote, clock: { now }, storage: st)
+    UpdateChecker(remoteVersion: remote, clock: { now }, storage: st)
 }
-let clean = InstalledBuild(commit: shaA, dirty: false)
-check(await checker({ shaA }).check(installed: clean) == .upToDate, "equal sha -> upToDate")
-check(await checker({ shaB }).check(installed: clean) == .updateAvailable(shaB), "different sha -> updateAvailable")
-check(await checker({ shaB }).check(installed: InstalledBuild(commit: nil, dirty: false)) == .devBuild(remoteDiffers: true), "unknown installed -> devBuild")
-check(await checker({ shaA }).check(installed: InstalledBuild(commit: shaA, dirty: true)) == .devBuild(remoteDiffers: false), "dirty -> devBuild (same)")
-check(await checker({ shaB }).check(installed: InstalledBuild(commit: shaA, dirty: true)) == .devBuild(remoteDiffers: true), "dirty -> devBuild (differs)")
+let clean = InstalledBuild(commit: shaA, dirty: false, version: "1.2.3")
+check(SemVer("1.2.3") == SemVer(1, 2, 3) && SemVer("v1.2.3") == SemVer(1, 2, 3), "semver parses with/without v")
+check(["1.2", "1.2.3.4", "1.2.x", "", "v", "1..3", "-1.2.3", "1.2.3-beta", " 1.2.3", "1.2.3\n", "１.２.３", "99999999999999999999.0.0"].allSatisfy { SemVer($0) == nil }, "semver rejects malformed input")
+check(SemVer("1.10.0")! > SemVer("1.9.0")! && SemVer("2.0.0")! > SemVer("1.99.99")! && SemVer("1.0.10")! > SemVer("1.0.9")! && !(SemVer("1.0.0")! > SemVer("1.0.0")!), "semver ordering (1.10.0 > 1.9.0)")
+check(await checker({ "1.2.3" }).check(installed: clean) == .upToDate, "equal version -> upToDate")
+check(await checker({ "1.2.4" }).check(installed: clean) == .updateAvailable("1.2.4"), "newer patch -> updateAvailable")
+check(await checker({ "1.3.0" }).check(installed: clean) == .updateAvailable("1.3.0"), "newer minor -> updateAvailable")
+check(await checker({ "2.0.0" }).check(installed: clean) == .updateAvailable("2.0.0"), "newer major -> updateAvailable")
+check(await checker({ "1.2.2" }).check(installed: clean) == .upToDate, "older remote -> upToDate")
+check(await checker({ "1.10.0" }).check(installed: InstalledBuild(commit: shaA, dirty: false, version: "1.9.0")) == .updateAvailable("1.10.0"), "1.10.0 is newer than 1.9.0")
+check(await checker({ "v1.2.4" }).check(installed: clean) == .updateAvailable("1.2.4"), "remote with v prefix is normalised")
+check(await checker({ "banana" }).check(installed: clean) == .checkFailed("unexpected response"), "malformed remote -> checkFailed")
+check(await checker({ "1.2.4" }).check(installed: InstalledBuild(commit: nil, dirty: false, version: "1.2.3")) == .devBuild(latest: "1.2.4"), "unknown commit -> devBuild, never nags")
+check(await checker({ "9.0.0" }).check(installed: InstalledBuild(commit: shaA, dirty: true, version: "1.2.3")) == .devBuild(latest: "9.0.0"), "dirty -> devBuild even when a newer release exists")
+check(await checker({ "9.0.0" }).check(installed: InstalledBuild(commit: shaA, dirty: false, version: nil)) == .devBuild(latest: "9.0.0"), "unreadable own version -> never nags")
 check(await checker({ throw Boom() }).check(installed: clean) == .checkFailed("offline"), "failure -> checkFailed")
 let memo = MemStore()
-_ = await checker({ shaB }, memo).check(installed: clean)
-check(memo.lastCheck == now && memo.lastRemoteSHA == shaB, "check records time + sha")
-check(memo.cacheInstalledCommit == shaA, "check records which installed build the cache is for")
-check(await checker({ shaA }, memo).checkIfDue(installed: clean) == nil, "auto check throttled right after a check")
+_ = await checker({ "1.3.0" }, memo).check(installed: clean)
+check(memo.lastCheck == now && memo.lastRemoteVersion == "1.3.0", "check records time + version")
+check(memo.cacheInstalledKey == "1.2.3|\(shaA)", "check records which installed build the cache is for")
+let badMemo = MemStore()
+_ = await checker({ "junk" }, badMemo).check(installed: clean)
+check(badMemo.lastRemoteVersion == nil && badMemo.lastCheck == nil, "malformed remote is not cached")
+check(await checker({ "1.2.3" }, memo).checkIfDue(installed: clean) == nil, "auto check throttled right after a check")
 let failMemo = MemStore()
 _ = await checker({ throw Boom() }, failMemo).checkIfDue(installed: clean)
 check(failMemo.lastCheck == now, "failed auto check still counts as an attempt")
@@ -240,55 +252,74 @@ check(UpdateChecker.shouldAutoCheck(last: nil, now: now), "throttle: never check
 check(!UpdateChecker.shouldAutoCheck(last: now.addingTimeInterval(-23 * 3600), now: now), "throttle: 23h -> not due")
 check(UpdateChecker.shouldAutoCheck(last: now.addingTimeInterval(-24 * 3600), now: now), "throttle: 24h -> due")
 check(UpdateChecker.shouldAutoCheck(last: now.addingTimeInterval(3600), now: now), "throttle: clock moved back -> due")
-check(GitRemote.parseLsRemote("\(shaA)\trefs/heads/main\n") == shaA && GitRemote.parseLsRemote("") == nil
-      && GitRemote.parseLsRemote("garbage\trefs/heads/main") == nil, "ls-remote parsing")
-check(InstalledBuild.from(info: ["TokenMeterCommit": shaA, "TokenMeterDirty": "false"]) == clean
+// Location header parsing (pure; no network)
+check(ReleaseRemote.parseLocation("https://github.com/roy-diptanil/TokenMeter/releases/tag/v1.0.1") == "1.0.1", "location: absolute")
+check(ReleaseRemote.parseLocation("/roy-diptanil/TokenMeter/releases/tag/v2.10.0?x=1#y") == "2.10.0", "location: relative, query ignored")
+check(ReleaseRemote.parseLocation("https://github.com/roy-diptanil/TokenMeter/releases/tag/latest") == nil
+      && ReleaseRemote.parseLocation("https://github.com/roy-diptanil/TokenMeter/releases") == nil
+      && ReleaseRemote.parseLocation("https://github.com/roy-diptanil/TokenMeter/releases/tag/v1.0") == nil
+      && ReleaseRemote.parseLocation("https://github.com/roy-diptanil/TokenMeter/releases/tag/v1.0.0-rc1") == nil
+      && ReleaseRemote.parseLocation("https://github.com/x/y/commit/v1.0.0") == nil
+      && ReleaseRemote.parseLocation(nil) == nil && ReleaseRemote.parseLocation("") == nil, "location: malformed ignored")
+check(await checker({ throw UpdateError.remote("unexpected response") }).check(installed: clean) == .checkFailed("unexpected response"), "malformed Location -> checkFailed")
+check(InstalledBuild.from(info: ["TokenMeterCommit": shaA, "TokenMeterDirty": "false", "CFBundleShortVersionString": "1.2.3"]) == clean
       && InstalledBuild.from(info: ["TokenMeterCommit": "unknown"]).commit == nil
       && InstalledBuild.from(info: ["TokenMeterCommit": shaA, "TokenMeterDirty": "true"]).dirty
       && InstalledBuild.from(info: nil).isDev && clean.short == "a1a1a1a", "installed build from Info.plist")
+check(VersionInfo.line(clean) == "TokenMeter 1.2.3 (a1a1a1a)"
+      && VersionInfo.line(InstalledBuild(commit: nil, dirty: false, version: "1.2.3")) == "TokenMeter 1.2.3 (dev)"
+      && VersionInfo.line(InstalledBuild(commit: shaA, dirty: true, version: "1.2.3")) == "TokenMeter 1.2.3 (dev)", "--version line")
+check(VersionInfo.footer(clean) == "Version 1.2.3"
+      && VersionInfo.footer(InstalledBuild(commit: shaA, dirty: true, version: "1.2.3")) == "Version 1.2.3 (a1a1a1a+local changes)", "footer: commit only for dev builds")
 // launch-time cache handling
-let c1 = MemStore(); c1.lastRemoteSHA = shaB; c1.lastCheck = now.addingTimeInterval(-3600); c1.cacheInstalledCommit = shaA
-let ls1 = checker({ shaA }, c1).launchState(installed: clean)
+let key = "1.2.3|\(shaA)"
+let c1 = MemStore(); c1.lastRemoteVersion = "1.3.0"; c1.lastCheck = now.addingTimeInterval(-3600); c1.cacheInstalledKey = key
+let ls1 = checker({ "1.2.3" }, c1).launchState(installed: clean)
 check(ls1.shown == nil && ls1.verifyNow, "cached update-available is never shown; verified live")
-let c2 = MemStore(); c2.lastRemoteSHA = shaA; c2.lastCheck = now.addingTimeInterval(-3600); c2.cacheInstalledCommit = shaA
-let ls2 = checker({ shaA }, c2).launchState(installed: clean)
+let c2 = MemStore(); c2.lastRemoteVersion = "1.2.3"; c2.lastCheck = now.addingTimeInterval(-3600); c2.cacheInstalledKey = key
+let ls2 = checker({ "1.2.3" }, c2).launchState(installed: clean)
 check(ls2.shown == .upToDate && !ls2.verifyNow, "cached upToDate shown instantly, no forced check")
-let c3 = MemStore(); c3.lastRemoteSHA = shaB; c3.lastCheck = now.addingTimeInterval(-3600); c3.cacheInstalledCommit = shaB
-let ls3 = checker({ shaA }, c3).launchState(installed: clean)
-check(ls3.shown == nil && ls3.verifyNow && c3.lastRemoteSHA == nil && c3.lastCheck == nil && c3.cacheInstalledCommit == shaA, "cache for a different installed build is discarded")
-let c4 = MemStore(); c4.lastRemoteSHA = shaB; c4.lastCheck = now.addingTimeInterval(-3600)   // legacy cache without installed-build key
-check(checker({ shaA }, c4).launchState(installed: clean).verifyNow && c4.lastRemoteSHA == nil, "legacy cache discarded")
-let c5 = MemStore(); c5.lastRemoteSHA = shaB; c5.cacheInstalledCommit = "unknown"
-check(checker({ shaA }, c5).launchState(installed: InstalledBuild(commit: nil, dirty: false)).shown == .devBuild(remoteDiffers: true), "cached devBuild shown instantly")
+let c3 = MemStore(); c3.lastRemoteVersion = "1.3.0"; c3.lastCheck = now.addingTimeInterval(-3600); c3.cacheInstalledKey = "1.2.2|\(shaB)"
+let ls3 = checker({ "1.2.3" }, c3).launchState(installed: clean)
+check(ls3.shown == nil && ls3.verifyNow && c3.lastRemoteVersion == nil && c3.lastCheck == nil && c3.cacheInstalledKey == key, "cache invalidated when the installed version changes")
+let c3b = MemStore(); c3b.lastRemoteVersion = "1.3.0"; c3b.cacheInstalledKey = "1.2.3|\(shaB)"
+check(checker({ "1.2.3" }, c3b).launchState(installed: clean).verifyNow && c3b.lastRemoteVersion == nil, "cache invalidated when only the commit changes")
+let c4 = MemStore(); c4.lastRemoteVersion = "1.3.0"; c4.lastCheck = now.addingTimeInterval(-3600)   // legacy cache without installed-build key
+check(checker({ "1.2.3" }, c4).launchState(installed: clean).verifyNow && c4.lastRemoteVersion == nil, "legacy cache discarded")
+let devB = InstalledBuild(commit: nil, dirty: false, version: "1.2.3")
+let c5 = MemStore(); c5.lastRemoteVersion = "1.3.0"; c5.cacheInstalledKey = "1.2.3|unknown"
+check(checker({ "1.3.0" }, c5).launchState(installed: devB).shown == .devBuild(latest: "1.3.0"), "cached devBuild shown instantly")
+let c6 = MemStore(); c6.lastRemoteVersion = "garbage"; c6.cacheInstalledKey = key
+check(checker({ "1.2.3" }, c6).launchState(installed: clean).verifyNow && c6.lastRemoteVersion == nil, "corrupt cached version discarded")
 await MainActor.run {
     // stale cache says update available, but remote now equals installed: never shows 'Update available'
-    let st = MemStore(); st.lastRemoteSHA = shaB; st.lastCheck = now.addingTimeInterval(-60); st.cacheInstalledCommit = shaA
-    let m = UpdateModel(installed: clean, checker: checker({ shaA }, st))
+    let st = MemStore(); st.lastRemoteVersion = "1.3.0"; st.lastCheck = now.addingTimeInterval(-60); st.cacheInstalledKey = key
+    let m = UpdateModel(installed: clean, checker: checker({ "1.2.3" }, st))
     check(m.state == .checking && !m.updateAvailable, "model: stale cache -> checking, not 'Update available'")
     Task { @MainActor in
         await m.pending?.value
-        check(m.state == .result(.upToDate) && st.lastRemoteSHA == shaA, "model: live check resolves to upToDate")
+        check(m.state == .result(.upToDate) && st.lastRemoteVersion == "1.2.3", "model: live check resolves to upToDate")
     }
 }
 try? await Task.sleep(nanoseconds: 200_000_000)
 // background check (no popover): throttle boundaries and model tick
 check(await MainActor.run { UpdateModel.pollInterval } == 3600, "poll interval is hourly")
 let bgNotDue = MemStore(); bgNotDue.lastCheck = now.addingTimeInterval(-24 * 3600 + 1)
-check(await checker({ shaB }, bgNotDue).checkIfDue(installed: clean) == nil, "bg: 23h59m59s -> no network check")
+check(await checker({ "1.3.0" }, bgNotDue).checkIfDue(installed: clean) == nil, "bg: 23h59m59s -> no network check")
 let bgDue = MemStore(); bgDue.lastCheck = now.addingTimeInterval(-24 * 3600)
-check(await checker({ shaB }, bgDue).checkIfDue(installed: clean) == .updateAvailable(shaB), "bg: exactly 24h -> checks without any popover")
+check(await checker({ "1.3.0" }, bgDue).checkIfDue(installed: clean) == .updateAvailable("1.3.0"), "bg: exactly 24h -> checks without any popover")
 check(!UpdateChecker.shouldAutoCheck(last: now.addingTimeInterval(-24 * 3600 + 1), now: now) && UpdateChecker.shouldAutoCheck(last: now.addingTimeInterval(-24 * 3600 - 1), now: now), "bg: 24h boundary")
 func bgModel(lastCheck: Date, remote: @escaping () async throws -> String) async -> (UpdateModel, MemStore) {
     await MainActor.run {
-        let st = MemStore(); st.lastRemoteSHA = shaA; st.lastCheck = lastCheck; st.cacheInstalledCommit = shaA
+        let st = MemStore(); st.lastRemoteVersion = "1.2.3"; st.lastCheck = lastCheck; st.cacheInstalledKey = key
         return (UpdateModel(installed: clean, checker: checker(remote, st)), st)
     }
 }
-let (mDue, _) = await bgModel(lastCheck: now.addingTimeInterval(-25 * 3600)) { shaB }
+let (mDue, _) = await bgModel(lastCheck: now.addingTimeInterval(-25 * 3600)) { "1.3.0" }
 await MainActor.run { check(mDue.state == .result(.upToDate), "bg model: starts upToDate from cache") }
 await mDue.autoCheck()?.value
-await MainActor.run { check(mDue.state == .result(.updateAvailable(shaB)), "bg model: due tick -> Update available") }
-let (mNot, _) = await bgModel(lastCheck: now.addingTimeInterval(-3600)) { shaB }
+await MainActor.run { check(mDue.state == .result(.updateAvailable("1.3.0")), "bg model: due tick -> Update available") }
+let (mNot, _) = await bgModel(lastCheck: now.addingTimeInterval(-3600)) { "1.3.0" }
 await mNot.autoCheck()?.value
 await MainActor.run { check(mNot.state == .result(.upToDate), "bg model: not-due tick leaves state unchanged") }
 let (mFail, _) = await bgModel(lastCheck: now.addingTimeInterval(-25 * 3600)) { throw Boom() }

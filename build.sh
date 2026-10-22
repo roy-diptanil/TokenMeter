@@ -2,8 +2,11 @@
 # Builds TokenMeter.app (ad-hoc signed) next to this script.
 #   ./build.sh               native build for this Mac
 #   UNIVERSAL=1 ./build.sh   universal (arm64 + x86_64) build, used for releases
+#   The version comes from the VERSION file (MAJOR.MINOR.PATCH) and is written to the app's Info.plist.
 set -euo pipefail
 cd "$(dirname "$0")"
+VERSION="$(tr -d '[:space:]' < VERSION)"
+printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "VERSION must be MAJOR.MINOR.PATCH (found '$VERSION')" >&2; exit 1; }
 if [ "${UNIVERSAL:-0}" = "1" ]; then
   # One --arch per build: several --arch flags switch SwiftPM to the Xcode build system,
   # which builds every product and collides on the two executable targets. Build each
@@ -44,8 +47,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleExecutable</key><string>TokenMeter</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
   <key>TokenMeterCommit</key><string>$COMMIT</string>
   <key>TokenMeterDirty</key><string>$DIRTY</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>

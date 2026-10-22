@@ -1,4 +1,6 @@
 import AppKit
+import UsageCore
+if CommandLine.arguments.contains("--version") { print(VersionInfo.line(.current)); exit(0) }
 if let i = CommandLine.arguments.firstIndex(of: "--make-iconset"), i + 1 < CommandLine.arguments.count {
     NSApplication.shared.setActivationPolicy(.accessory)
     GaugeIcon.writeIconset(to: CommandLine.arguments[i + 1]); exit(0)

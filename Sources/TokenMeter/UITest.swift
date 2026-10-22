@@ -28,8 +28,8 @@ enum UITest {
             let store = Store(accounts: [a1, a2, a3, a4], snapshots: [a1.id: s1, a2.id: s2, a3.id: s3, a4.id: s4])
             store.setWindow(.d7, for: a1); store.setWindow(.d1, for: a2)   // independent per-account selections
             store.refreshResult = "2 of 4 need attention"
-            let updater = UpdateModel(installed: InstalledBuild(commit: String(repeating: "a", count: 40), dirty: false),
-                                      state: .result(.updateAvailable(String(repeating: "b", count: 40))))
+            let updater = UpdateModel(installed: InstalledBuild(commit: String(repeating: "a", count: 40), dirty: false, version: "1.0.0"),
+                                      state: .result(.updateAvailable("1.0.1")))
             store.confirmingRemoval = a2.id
             let card = HStack(alignment: .top, spacing: 12) {
                 AccountCard(store: store, account: a2).frame(width: 340)

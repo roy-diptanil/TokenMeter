@@ -1,0 +1,109 @@
+# Continuous integration: build, test, package, and smoke-test the packaged app on several macOS versions.
+# Never publishes anything (releases are made by release.yml when VERSION changes on main).
+# Only first-party actions. The prebuilt app is built once on macos-15 and then launched on every runner OS in `smoke`.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+        experimental: [false]
+        include:
+          # GitHub deprecates the macos-14 runner image on 2026-11-02; failures here do not fail the run.
+          - os: macos-14
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: |
+          swift --version
+          xcodebuild -version
+          xcode-select -p
+          sw_vers
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Self tests
+        run: swift run SelfTest
+
+      - name: Installer tests
+        run: bash scripts/test-install.sh
+
+      # The release app is always built on macos-15 (Xcode 16-series) so every OS below runs the same binary.
+      - name: Package release files
+        if: matrix.os == 'macos-15'
+        run: scripts/package-release.sh
+
+      - name: Upload release files
+        if: matrix.os == 'macos-15'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: |
+            build/TokenMeter.zip
+            build/TokenMeter.zip.sha256
+            build/TokenMeter.commit
+            build/TokenMeter.version
+          if-no-files-found: error
+
+  smoke:
+    name: smoke (${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+        experimental: [false]
+        include:
+          - os: macos-14
+            experimental: true
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: release
+
+      - name: Verify checksum and unpack
+        working-directory: release
+        run: |
+          shasum -a 256 -c TokenMeter.zip.sha256
+          ditto -x -k TokenMeter.zip out
+          codesign --verify --deep out/TokenMeter.app
+          echo "version: $(cat TokenMeter.version)  commit: $(cat TokenMeter.commit)"
+
+      - name: Universal binary (arm64 and x86_64)
+        working-directory: release
+        run: |
+          archs="$(lipo -archs out/TokenMeter.app/Contents/MacOS/TokenMeter)"
+          echo "archs: $archs"
+          case "$archs" in *arm64*) ;; *) echo "missing arm64"; exit 1 ;; esac
+          case "$archs" in *x86_64*) ;; *) echo "missing x86_64"; exit 1 ;; esac
+
+      - name: Launch headless commands (20s timeout each)
+        working-directory: release
+        run: |
+          sw_vers -productVersion
+          perl -e 'alarm 20; exec @ARGV' out/TokenMeter.app/Contents/MacOS/TokenMeter --version
+          perl -e 'alarm 20; exec @ARGV' out/TokenMeter.app/Contents/MacOS/TokenMeter --login-item status
