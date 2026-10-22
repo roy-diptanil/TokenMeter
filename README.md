@@ -18,10 +18,10 @@ What the script does (it is short, read it first if you like):
 
 - Installs the newest stable release: a prebuilt universal (Apple silicon + Intel) app. No Xcode, Swift or git needed.
 - Falls back to building `main` from source (checkout in `~/.tokenmeter-src`) if the prebuilt download or any of its checks fails. See Troubleshooting.
-- Installs to `/Applications`.
+- Installs to `~/Applications` by default (no admin rights needed). If a copy already exists in `/Applications` (and none in `~/Applications`), it is updated there in place. For a system-wide install use `TOKENMETER_DEST=/Applications`; to move an existing `/Applications` copy, run `uninstall.sh` and install again.
 - Never touches your sign-ins or data in `~/Library`.
 - Safe to re-run to update.
-- If `/Applications` isn't writable (and `sudo` can't prompt), it installs to `~/Applications` instead and says so.
+- The installer never uses `sudo` unless you set `TOKENMETER_DEST` to a folder you can't write to.
 
 Pin or roll back to a specific release, or build the tip of `main` yourself:
 

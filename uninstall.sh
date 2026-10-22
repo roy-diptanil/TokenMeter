@@ -8,8 +8,9 @@
 #
 # What this script does:
 #   - Quits TokenMeter (gracefully, force-kill only as a last resort).
-#   - Removes $TOKENMETER_DEST/TokenMeter.app (default /Applications), using sudo
-#     only if that folder is not writable, and ~/Applications/TokenMeter.app if present.
+#   - Removes ~/Applications/TokenMeter.app (the default install location; no sudo needed)
+#     and $TOKENMETER_DEST/TokenMeter.app (default /Applications, for system-wide installs),
+#     using sudo only if that /Applications folder is not writable.
 #   - Removes the source checkout $TOKENMETER_SRC (default ~/.tokenmeter-src).
 #   - By default KEEPS your data (accounts, cache, WebKit sign-in sessions).
 #   - With --purge-data it also deletes that data. It lists exactly what will be
@@ -116,7 +117,7 @@ main() {
     say "No app at $APP"
   fi
 
-  # Fallback install location used when /Applications was not writable (only this one bundle).
+  # Default install location (only this one bundle).
   local HAPP="$HOME/Applications/TokenMeter.app"
   if [ "$HAPP" != "$APP" ] && [ -e "$HAPP" ]; then
     say "Removing $HAPP"
