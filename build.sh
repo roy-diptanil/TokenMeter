@@ -4,10 +4,21 @@
 #   UNIVERSAL=1 ./build.sh   universal (arm64 + x86_64) build, used for releases
 set -euo pipefail
 cd "$(dirname "$0")"
-ARCHFLAGS=()
-if [ "${UNIVERSAL:-0}" = "1" ]; then ARCHFLAGS=(--arch arm64 --arch x86_64); fi
-swift build -c release ${ARCHFLAGS[@]+"${ARCHFLAGS[@]}"}
-BIN="$(swift build -c release ${ARCHFLAGS[@]+"${ARCHFLAGS[@]}"} --show-bin-path)/TokenMeter"
+if [ "${UNIVERSAL:-0}" = "1" ]; then
+  # One --arch per build: several --arch flags switch SwiftPM to the Xcode build system,
+  # which builds every product and collides on the two executable targets. Build each
+  # architecture natively, then merge with lipo.
+  SLICES=()
+  for A in arm64 x86_64; do
+    swift build -c release --arch "$A" --product TokenMeter
+    SLICES+=("$(swift build -c release --arch "$A" --show-bin-path)/TokenMeter")
+  done
+  BIN="$(mktemp -d)/TokenMeter"
+  lipo -create -output "$BIN" "${SLICES[@]}"
+else
+  swift build -c release
+  BIN="$(swift build -c release --show-bin-path)/TokenMeter"
+fi
 APP="$PWD/build/TokenMeter.app"
 rm -rf "$APP"
 # Source commit this build came from (read by the in-app update check).
