@@ -1,0 +1,62 @@
+# Builds the universal app on GitHub's macOS runners.
+#   pull_request:  build + upload as a workflow artifact only (never publishes)
+#   push to main:  also publishes/updates the rolling "latest" release that install.sh downloads
+# Uses the pinned macos-15 label rather than macos-latest so the Xcode/SDK does not change underneath us.
+# Only first-party actions plus the preinstalled gh CLI with the built-in github.token.
+name: build-release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Self tests
+        run: swift run SelfTest
+
+      - name: Package release
+        run: scripts/package-release.sh
+
+      - name: Upload build files (pull requests only)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: TokenMeter-release-files
+          path: |
+            build/TokenMeter.zip
+            build/TokenMeter.zip.sha256
+            build/TokenMeter.commit
+
+      - name: Publish latest release (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NOTES="Build of main at ${GITHUB_SHA}"
+          if gh release view latest >/dev/null 2>&1; then
+            # .commit goes LAST so readers never see a new commit marker with old assets.
+            gh release upload latest build/TokenMeter.zip build/TokenMeter.zip.sha256 build/TokenMeter.commit --clobber
+            gh release edit latest --notes "$NOTES" --latest --prerelease=false
+          else
+            gh release create latest build/TokenMeter.zip build/TokenMeter.zip.sha256 build/TokenMeter.commit \
+              --title "TokenMeter (latest build of main)" --notes "$NOTES" --target "$GITHUB_SHA" --latest
+          fi
